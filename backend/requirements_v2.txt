@@ -1,0 +1,18 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+pydantic
+pydantic-settings
+passlib[bcrypt]
+pyjwt
+python-multipart
+email-validator
+Pillow
+httpx
+psycopg2-binary
+argon2-cffi
+# Extraction Dependencies
+pytesseract
+pyzbar
+# AI Dependencies
+google-generativeai

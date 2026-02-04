@@ -1,0 +1,30 @@
+# Ignore heavy sibling directories to prevent EAS upload errors
+backend/
+frontend/
+deploy/
+*.tar
+*.db
+*.sqlite3
+assets/monday_files/
+data/
+.venv/
+venv/
+# Mobile Specific
+mobile/.expo/
+mobile/node_modules/
+mobile/dist/
+mobile/web-build/
+mobile/*.tar
+mobile/.gitignore
+mobile/.easignore
+
+# General
+.git/
+.idea/
+.vscode/
+scripts/
+**/.expo/
+**/.expo-shared/
+**/web-build/
+**/dist/
+**/*.tar

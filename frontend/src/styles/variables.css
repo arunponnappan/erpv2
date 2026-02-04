@@ -1,0 +1,39 @@
+:root {
+  /* Premium Palette */
+  --primary: #6366f1; /* Indigo 500 */
+  --primary-dark: #4f46e5;
+  --secondary: #8b5cf6; /* Violet 500 */
+  
+  /* Neutral */
+  --bg-body: #f8fafc; /* Slate 50 */
+  --bg-card: #ffffff;
+  --text-main: #1e293b; /* Slate 800 */
+  --text-muted: #64748b; /* Slate 500 */
+  --border: #e2e8f0;
+
+  /* State */
+  --success: #10b981;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+
+  /* Shadows & Glass */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.2);
+  --backdrop-blur: 12px;
+
+  /* Typography */
+  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+}
+
+.dark {
+  --bg-body: #0f172a; /* Slate 900 */
+  --bg-card: #1e293b;
+  --text-main: #f1f5f9;
+  --text-muted: #94a3b8;
+  --border: #334155;
+  --glass-bg: rgba(30, 41, 59, 0.7);
+}

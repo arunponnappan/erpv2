@@ -1,0 +1,12 @@
+
+
+# Except dependencies and build artifacts
+node_modules/
+.expo/
+*.tar
+dist/
+dist/
+web-build/
+*.jks
+*.keystore
+.env*
