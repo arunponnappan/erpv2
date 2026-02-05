@@ -741,9 +741,28 @@ class MondayService:
                 try:
                     session.commit()
                     yield json.dumps({"status": "progress", "message": f"Committed: {added_count} new, {updated_count} updated."}) + "\n"
+                    
+                    # --- ASSET CLEANUP ---
+                    # Identify assets that were removed from items in this batch
+                    # We compare 'existing_assets' vs 'assets_map' (new)
+                    # We already fetched existing_item in the loop, but we need to do this carefully.
+                    # It's better to do this during the main loop or right after commit if we tracked deletions.
+                    # Let's do a post-process on the batch since we have item_asset_map_refs (new state)
+                    # But we need the OLD state. The loop above already updated the DB objects.
+                    
+                    # Refined Approach:
+                    # Inside the loop, we had 'existing_assets'. We should have diffed them there.
+                    # But we didn't want to delete files if the commit failed. 
+                    # Now commit is successful. But we lost the 'existing_assets' reference (overwritten in DB object memory).
+                    
+                    # To be safe and simple: We will trust the "Preserve Existing" logic for now. 
+                    # True orphan cleanup (deleted assets) might require a second pass or better tracking in the future.
+                    # For now, we focus on ITEM deletion cleanup below, which is the big space saver.
+                    
                 except Exception as e:
                     session.rollback()
                     yield json.dumps({"status": "error", "message": f"Commit Failed: {str(e)}"}) + "\n"
+
                 
                 if not cursor:
                     has_more = False
@@ -771,7 +790,20 @@ class MondayService:
                         session.exec(statement)
                     session.commit()
                     pruned_count = len(ids_to_delete)
-                    yield json.dumps({"status": "progress", "message": f"Pruned {pruned_count} orphaned items."}) + "\n"
+                    
+                    # --- FILE CLEANUP for Deleted Items ---
+                    deleted_dirs_count = 0
+                    for item_id in ids_to_delete:
+                        try:
+                            item_dir = Path(self.ASSETS_DIR) / str(board_id) / str(item_id)
+                            if item_dir.exists() and item_dir.is_dir():
+                                import shutil
+                                shutil.rmtree(item_dir)
+                                deleted_dirs_count += 1
+                        except Exception as cleanup_err:
+                            print(f"[CLEANUP ERROR] Failed to remove dir for item {item_id}: {cleanup_err}")
+                            
+                    yield json.dumps({"status": "progress", "message": f"Pruned {pruned_count} orphaned items and {deleted_dirs_count} folders."}) + "\n"
                 except Exception as e:
                     session.rollback()
                     print(f"Pruning failed: {e}")

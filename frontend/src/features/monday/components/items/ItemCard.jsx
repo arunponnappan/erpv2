@@ -1,7 +1,8 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { FiImage, FiSettings, FiExternalLink, FiClock, FiCheckCircle } from 'react-icons/fi';
-import { getItemThumbnail } from '../../utils/imageHelpers';
+import { FiImage, FiSettings, FiExternalLink, FiClock, FiCheckCircle, FiDownload, FiRefreshCw } from 'react-icons/fi';
+import { getItemThumbnail, getProxyUrl, downloadFile } from '../../utils/imageHelpers';
+import syncService from '../../services/syncService';
 
 /**
  * Modern Item Card for Gallery View
@@ -97,36 +98,96 @@ const ItemCard = ({ item, onClick, onEditClick, isEditMode, columnsMap, cardColu
             onClick={() => onClick?.(item)}
         >
             {/* Image Container */}
-            <div className="aspect-video bg-gray-50 dark:bg-gray-900 relative overflow-hidden flex-shrink-0">
-                {thumbnail ? (
-                    <img
-                        src={thumbnail}
-                        alt={item.name}
-                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                    />
+            <div className="aspect-video bg-gray-50 dark:bg-gray-900 relative overflow-hidden flex-shrink-0 group/image">
+                {item.assets && Object.values(item.assets).some(a => a.local_path || a.optimized_path) ? (
+                    <>
+                        <img
+                            src={getItemThumbnail(item)}
+                            alt={item.name}
+                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                            onError={(e) => {
+                                e.target.onerror = null;
+                                e.target.parentElement.classList.add('image-error');
+                            }}
+                        />
+                        {/* Download Action - Only for synced images */}
+                        <div className="absolute top-2 right-2 opacity-0 group-hover/image:opacity-100 transition-opacity">
+                            <button
+                                onClick={async (e) => {
+                                    e.stopPropagation();
+                                    const file = Object.values(item.assets).find(a => a.local_path);
+                                    if (file) {
+                                        // Construct local URL
+                                        const url = getProxyUrl(file, false); // Get original
+                                        if (url) await downloadFile(url, file.name);
+                                    }
+                                }}
+                                className="p-1.5 bg-black/50 text-white rounded-full hover:bg-indigo-600 backdrop-blur-sm transition-colors"
+                                title="Download Original"
+                            >
+                                <FiDownload size={14} />
+                            </button>
+                        </div>
+                    </>
+                ) : item.assets && Object.keys(item.assets).length > 0 ? (
+                    // Has assets but not synced (Remote only)
+                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 bg-gray-100 dark:bg-gray-800 gap-2">
+                        <span className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Image Available</span>
+                        <button
+                            onClick={async (e) => {
+                                e.stopPropagation();
+                                try {
+                                    e.target.disabled = true;
+                                    e.target.innerText = '...';
+                                    await syncService.startSync(item.board_id, {
+                                        filtered_item_ids: [String(item.id)],
+                                        showImages: true,
+                                        optimizeImages: true
+                                    });
+                                    // Toast handled by service or global listener? 
+                                    // Actually syncService doesn't dispatch global toast unless hook used.
+                                    // Ideally we'd trigger a context refresh or hook. 
+                                    // For now, let's assume the UI updates via standard SWR/Query revalidation if set up, 
+                                    // or we might need to manually trigger refresh.
+                                    // Simple UX: Button becomes "Syncing"
+                                } catch (err) {
+                                    console.error(err);
+                                    e.target.innerText = 'Error';
+                                }
+                            }}
+                            className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 text-indigo-600 text-xs font-semibold rounded-full hover:bg-indigo-100 transition-colors border border-indigo-200"
+                        >
+                            <FiRefreshCw size={12} /> Get Image
+                        </button>
+                    </div>
                 ) : (
+                    // No assets at all
                     <div className="w-full h-full flex flex-col items-center justify-center text-gray-300 dark:text-gray-700 bg-gray-100 dark:bg-gray-800">
                         <FiImage size={32} className="mb-2 opacity-50" />
                     </div>
                 )}
 
-                {/* Overlay Actions */}
-                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
-                    <button
-                        className="p-2 bg-white text-gray-900 rounded-full hover:bg-indigo-600 hover:text-white transition-all transform hover:scale-110 shadow-lg"
-                        title="View Details"
-                    >
-                        <FiExternalLink size={18} />
-                    </button>
-                    {isEditMode && (
+                {/* Overlay Actions (DETAILS / EDIT) */}
+                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 pointer-events-none">
+                    {/* Use pointer-events-auto for buttons to ensure they work */}
+                    <div className="pointer-events-auto flex gap-2">
                         <button
-                            onClick={(e) => { e.stopPropagation(); onEditClick?.(item); }}
+                            onClick={(e) => { e.stopPropagation(); onClick?.(item); }}
                             className="p-2 bg-white text-gray-900 rounded-full hover:bg-indigo-600 hover:text-white transition-all transform hover:scale-110 shadow-lg"
-                            title="Edit Item"
+                            title="View Details"
                         >
-                            <FiSettings size={18} />
+                            <FiExternalLink size={18} />
                         </button>
-                    )}
+                        {isEditMode && (
+                            <button
+                                onClick={(e) => { e.stopPropagation(); onEditClick?.(item); }}
+                                className="p-2 bg-white text-gray-900 rounded-full hover:bg-indigo-600 hover:text-white transition-all transform hover:scale-110 shadow-lg"
+                                title="Edit Item"
+                            >
+                                <FiSettings size={18} />
+                            </button>
+                        )}
+                    </div>
                 </div>
             </div>
 

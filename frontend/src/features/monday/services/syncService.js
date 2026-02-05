@@ -46,6 +46,8 @@ class MondaySyncService {
                     optimize_images: optimizeImages,
                     keep_original_images: keepOriginals,
                     force_sync_images: forceSyncImages,
+                    filters: options.filters,
+                    filtered_item_ids: options.filtered_item_ids,
                 },
                 abortController.signal
             );

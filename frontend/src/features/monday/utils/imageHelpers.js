@@ -74,11 +74,8 @@ export const getProxyUrl = (file, optimized = true) => {
         }
     }
 
-    // Use public URL if available
-    if (file.public_url) {
-        return file.public_url;
-    }
-
+    // Enforce Local Only: Do NOT return public_url
+    // If local path is missing, return null to trigger "Not Synced" state in UI.
     return null;
 };
 

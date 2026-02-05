@@ -7,7 +7,10 @@ import { useLayout } from '../../context/LayoutContext';
 import { useDebug } from '../../context/DebugContext';
 import { FiMenu, FiChevronRight, FiChevronLeft, FiChevronDown, FiChevronUp, FiAlertCircle, FiLoader, FiX, FiDownload, FiExternalLink, FiGrid, FiList, FiLogOut, FiFilter, FiSearch, FiImage, FiPlus, FiTrash2, FiZap, FiRefreshCw, FiArrowUp, FiArrowDown, FiEdit2, FiCheck, FiSettings, FiCpu, FiDownloadCloud, FiRotateCw, FiRotateCcw, FiCrop, FiCopy, FiZoomIn, FiZoomOut, FiLock, FiSidebar, FiClock } from 'react-icons/fi';
 import JobHistoryPanel from '../../features/monday/components/sync/JobHistoryPanel';
+import SyncMenu from '../../features/monday/components/sync/SyncMenu';
 import { useMondaySync } from '../../features/monday/hooks/useMondaySync';
+import { getProxyUrl } from '../../features/monday/utils/imageHelpers';
+import syncService from '../../features/monday/services/syncService';
 
 // --- SHARED HELPERS & COMPONENTS ---
 
@@ -354,7 +357,7 @@ const getItemImages = (item, optimize = false, targetColumnId = null) => {
 };
 
 // Helper: Render table cell
-const renderCell = (colVal, item, showImages, optimizeImages = false, isEditable = false, onUpdate = null, columnDef = null, isEditMode = false, modifiedItems = null) => {
+const renderCell = (colVal, item, showImages, optimizeImages = false, isEditable = false, onUpdate = null, columnDef = null, isEditMode = false, modifiedItems = null, refreshKey = 0) => {
     if (!colVal) return '-';
 
     // Status/Dropdown Edit Mode
@@ -418,8 +421,9 @@ const renderCell = (colVal, item, showImages, optimizeImages = false, isEditable
                 {images.map((img, i) => (
                     <div key={i} className="relative group/img z-0 hover:z-20 transition-all hover:scale-110">
                         <CachedImage
+                            key={`${i}-${refreshKey}`}
                             file={img}
-                            proxyUrl={img.proxyUrl}
+                            proxyUrl={img.proxyUrl ? `${img.proxyUrl}${img.proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : null}
                             originalUrl={img.originalUrl}
                             usePublic={img.usePublic}
                             className="inline-block h-8 w-8 rounded-full ring-2 ring-white object-cover bg-gray-100 cursor-pointer shadow-sm"
@@ -456,7 +460,7 @@ const renderCell = (colVal, item, showImages, optimizeImages = false, isEditable
 };
 
 // Component: Table Row
-const ItemRow = ({ item, level = 0, columns, onRowClick, showImages, optimizeImages, editableColumns = [], onUpdate = null, columnsMap = null, isEditMode = false, modifiedItems = null }) => {
+const ItemRow = ({ item, level = 0, columns, onRowClick, showImages, optimizeImages, editableColumns = [], onUpdate = null, columnsMap = null, isEditMode = false, modifiedItems = null, refreshKey }) => {
     const [expanded, setExpanded] = useState(false);
     const hasSubitems = item.subitems && item.subitems.length > 0;
     const paddingLeft = `${level * 20 + 10}px`;
@@ -526,18 +530,18 @@ const ItemRow = ({ item, level = 0, columns, onRowClick, showImages, optimizeIma
                     const colVal = item.column_values.find(c => c.id === colId) || { id: colId, text: '', value: '' }; // Fallback for missing cols
                     const isEditable = editableColumns.includes(colId);
                     const colDef = columnsMap ? columnsMap[colId] : null;
-                    return <td key={`${item.id}-${colId}`} className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 border-r border-gray-100 last:border-0">{renderCell(colVal, item, showImages, optimizeImages, isEditable, onUpdate, colDef, isEditMode, modifiedItems)}</td>;
+                    return <td key={`${item.id}-${colId}`} className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 border-r border-gray-100 last:border-0">{renderCell(colVal, item, showImages, optimizeImages, isEditable, onUpdate, colDef, isEditMode, modifiedItems, refreshKey)}</td>;
                 })}
             </tr>
             {expanded && hasSubitems && item.subitems.map(sub => (
-                <ItemRow key={sub.id} item={sub} level={level + 1} columns={columns} onRowClick={onRowClick} showImages={showImages} optimizeImages={optimizeImages} editableColumns={editableColumns} onUpdate={onUpdate} columnsMap={columnsMap} isEditMode={isEditMode} modifiedItems={modifiedItems} />
+                <ItemRow key={sub.id} item={sub} level={level + 1} columns={columns} onRowClick={onRowClick} showImages={showImages} optimizeImages={optimizeImages} editableColumns={editableColumns} onUpdate={onUpdate} columnsMap={columnsMap} isEditMode={isEditMode} modifiedItems={modifiedItems} refreshKey={refreshKey} />
             ))}
         </>
     );
 };
 
 // Component: Details Drawer
-const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsMap, zIndex = 50, inline = false, onItemUpdate, editableColumns = [] }) => {
+const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsMap, zIndex = 50, inline = false, onItemUpdate, editableColumns = [], refreshKey = 0 }) => {
     const [downloading, setDownloading] = useState({});
     const [isEditing, setIsEditing] = useState(false);
     const [editValues, setEditValues] = useState({});
@@ -587,37 +591,23 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
                                 const foundAsset = itm.assets.find(a => a.id === String(f.assetId) || a.id === parseInt(f.assetId));
                                 if (foundAsset) {
                                     assetData = foundAsset;
+
+                                    // NEW: Use helper to get strictly local URL
+                                    localUrl = getProxyUrl(foundAsset, optimizeImages);
+
+                                    // Fallback to original ONLY if we want to allow public links (BUT requirement is local-only)
+                                    // So we store originalUrl just for reference or "Download Original" but NOT for display
                                     originalUrl = foundAsset.public_url || foundAsset.url;
-                                    usePublic = !!foundAsset.public_url;
-
-                                    if (foundAsset.local_url) localUrl = foundAsset.local_url;
-                                    if (optimizeImages && foundAsset.optimized_url) localUrl = foundAsset.optimized_url;
-
-                                    // Fix: Ensure localUrl is absolute (pointing to Backend)
-                                    if (localUrl && !localUrl.startsWith('http')) {
-                                        const backendOrigin = new URL(api.defaults.baseURL).origin;
-                                        // Ensure no double slash
-                                        const path = localUrl.startsWith('/') ? localUrl : `/${localUrl}`;
-                                        localUrl = `${backendOrigin}${path}`;
-                                    }
                                 }
                             }
-
-                            // Proxy Logic
-                            const optimizeParam = optimizeImages ? '&optimize=true&width=400' : '';
-                            const proxyUrl = localUrl
-                                ? localUrl
-                                : (originalUrl ? `${api.defaults.baseURL}/integrations/monday/proxy?url=${encodeURIComponent(originalUrl)}${usePublic ? '&skip_auth=true' : ''}${optimizeParam}` : null);
-
 
                             allFiles.push({
                                 ...f,
                                 ...assetData,
                                 columnId: col.id,
                                 itemName: itm.name,
-                                proxyUrl,
-                                originalUrl,
-                                usePublic,
+                                proxyUrl: localUrl, // Only populated if local
+                                originalUrl,        // Monday URL
                                 isLocal: !!localUrl
                             });
                         });
@@ -629,6 +619,8 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
     extractFiles(item);
 
     const handleDownload = async (url, filename) => {
+        // ... (Keep existing download logic if needed, or better, use Global downloadFile helper if available)
+        // For now, reusing existing logic to minimize diff, but note that `downloadFile` in ItemCard is cleaner.
         if (downloading[url]) return;
         try {
             setDownloading(prev => ({ ...prev, [url]: 1 }));
@@ -659,6 +651,7 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
             URL.revokeObjectURL(objectUrl);
         } catch (error) {
             console.error("Download error:", error);
+            toast.error("Download Failed");
         } finally {
             setDownloading(prev => { const next = { ...prev }; delete next[url]; return next; });
         }
@@ -698,24 +691,107 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
                 {allFiles.length > 0 && (
                     <div className="mb-8">
                         <h3 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Attachments ({allFiles.length})</h3>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                             {allFiles.map((file, idx) => {
-                                // Properties already calculated in extractFiles
-                                const { isLocal, proxyUrl, originalUrl, usePublic, name } = file;
+                                const { isLocal, proxyUrl, originalUrl, name } = file;
                                 const isImage = /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(name || '');
                                 const progress = proxyUrl && downloading[proxyUrl];
+
                                 return (
-                                    <div key={idx} className="border rounded-lg overflow-hidden flex flex-col shadow-sm">
-                                        {isImage && proxyUrl ? <CachedImage file={file} proxyUrl={proxyUrl} originalUrl={originalUrl} usePublic={usePublic} shouldLoad={showImages} isLocal={isLocal} className="w-full h-32 object-cover" /> : <div className="w-full h-32 bg-gray-100 flex items-center justify-center text-gray-400"><FiImage className="w-10 h-10 opacity-20" /></div>}
-                                        <div className="p-2 bg-white">
-                                            <p className="text-xs text-gray-500 truncate mb-1" title={file.name}>{file.name}</p>
-                                            <p className="text-[10px] text-gray-400 mb-2">
-                                                {file.size ? (file.size / 1024).toFixed(0) + ' KB' : (file.file_size ? (file.file_size / 1024).toFixed(0) + ' KB' : 'Size Unknown')}
-                                            </p>
-                                            <div className="flex gap-2">
-                                                <button onClick={() => { if (usePublic) window.open(originalUrl, '_blank'); else if (proxyUrl) handleDownload(proxyUrl, file.name); }} disabled={!!progress && !usePublic} className={`flex-1 text-center px-2 py-1 text-xs rounded flex items-center justify-center gap-1 font-medium ${progress ? 'bg-blue-100 text-blue-800' : 'bg-indigo-50 text-indigo-700'}`}>{progress ? `${progress}%` : 'Download'}</button>
-                                                {usePublic && <button onClick={() => window.open(originalUrl, '_blank')} className="px-2 py-1 text-xs rounded bg-gray-50 border"><FiExternalLink /></button>}
+                                    <div key={idx} className="group relative border rounded-xl overflow-hidden bg-gray-50 hover:shadow-md transition-shadow">
+                                        {/* Image Display */}
+                                        <div className="aspect-square bg-gray-200 relative overflow-hidden">
+                                            {isImage ? (
+                                                isLocal && proxyUrl ? (
+                                                    <img
+                                                        src={proxyUrl ? `${proxyUrl}${proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : proxyUrl}
+                                                        alt={name}
+                                                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                                                        onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                                                    />
+                                                ) : (
+                                                    // Placeholder for missing/remote image
+                                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 p-2 text-center">
+                                                        <FiImage className="w-8 h-8 opacity-40 mb-1" />
+                                                        <span className="text-[10px] uppercase font-bold tracking-wider opacity-60">Not Synced</span>
+                                                    </div>
+                                                )
+                                            ) : (
+                                                // Generic File Placeholder
+                                                <div className="w-full h-full flex flex-col items-center justify-center text-gray-400">
+                                                    <FiDownloadCloud className="w-8 h-8 opacity-40" />
+                                                </div>
+                                            )}
+
+                                            {/* Local Image Fallback Hidden Div */}
+                                            <div className="hidden w-full h-full flex-col items-center justify-center text-red-400 absolute inset-0 bg-gray-100">
+                                                <FiAlertCircle className="w-6 h-6 mb-1" />
+                                                <span className="text-[10px]">Load Error</span>
                                             </div>
+                                        </div>
+
+                                        {/* Overlay Actions */}
+                                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2">
+                                            <div className="flex gap-2 justify-center mb-auto pt-8">
+                                                {/* View Action (Only if local) */}
+                                                {isLocal && proxyUrl && (
+                                                    <button
+                                                        onClick={() => window.open(proxyUrl, '_blank')}
+                                                        className="p-1.5 bg-white text-gray-900 rounded-full hover:bg-indigo-600 hover:text-white shadow-sm"
+                                                        title="Open File"
+                                                    >
+                                                        <FiExternalLink size={14} />
+                                                    </button>
+                                                )}
+                                            </div>
+
+                                            {/* Sync / Download Actions */}
+                                            {isLocal && proxyUrl ? (
+                                                <button
+                                                    onClick={() => handleDownload(proxyUrl, name)}
+                                                    className="w-full py-1.5 bg-white text-indigo-600 rounded-md text-xs font-bold hover:bg-indigo-50 flex items-center justify-center gap-1 shadow-sm"
+                                                >
+                                                    {progress ? `${progress}%` : <><FiDownload size={14} /> Save</>}
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    onClick={async (e) => {
+                                                        e.stopPropagation();
+                                                        try {
+                                                            e.target.disabled = true;
+                                                            e.target.textContent = 'Syncing...';
+                                                            const toastId = toast.info("Syncing image...", { autoClose: false });
+
+                                                            await syncService.startSync(item.board_id, {
+                                                                filtered_item_ids: [String(item.id)],
+                                                                showImages: true,
+                                                                optimizeImages: true
+                                                            });
+
+                                                            toast.dismiss(toastId);
+                                                            toast.success("Image synced!");
+                                                            // Trigger update? The parent usually polls or we might need to force refresh item.
+                                                            // For now, user has to refresh or wait for poll using JobHistory
+                                                        } catch (err) {
+                                                            console.error(err);
+                                                            toast.error("Sync Failed");
+                                                            e.target.disabled = false;
+                                                            e.target.textContent = 'Retry';
+                                                        }
+                                                    }}
+                                                    className="w-full py-1.5 bg-indigo-600 text-white rounded-md text-xs font-bold hover:bg-indigo-700 flex items-center justify-center gap-1 shadow-md border border-indigo-500"
+                                                >
+                                                    <FiRefreshCw size={14} /> Get Image
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {/* Metadata Footer */}
+                                        <div className="p-2 bg-white border-t border-gray-100">
+                                            <p className="text-xs font-medium text-gray-900 truncate" title={name}>{name}</p>
+                                            <p className="text-[10px] text-gray-400">
+                                                {file.size ? (file.size / 1024).toFixed(0) + ' KB' : 'Unknown Size'}
+                                            </p>
                                         </div>
                                     </div>
                                 );
@@ -816,13 +892,12 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
 };
 
 // Component: Full Screen Image Gallery Modal
-const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsMap, onItemUpdate, editableColumns, onNext, onPrev, hasNext, hasPrev }) => {
+const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsMap, onItemUpdate, editableColumns, onNext, onPrev, hasNext, hasPrev, refreshKey, onRotationComplete }) => {
     const [currentIndex, setCurrentIndex] = useState(item?.initialIndex || 0);
     const [showDownloadMenu, setShowDownloadMenu] = useState(false);
     const [showExtractMenu, setShowExtractMenu] = useState(false); // New state for Smart Tools dropdown
     const [switchNotification, setSwitchNotification] = useState(null); // Item switch visual feedback
-    // Initial rotation from image or 0
-    const [rotation, setRotation] = useState(0);
+    // Rotation removed for permanent mode
     // Zoom/Details State
     const [zoom, setZoom] = useState(1);
     const [showDetails, setShowDetails] = useState(true); // Default to TRUE as requested
@@ -863,7 +938,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
 
     // Reset rotation/zoom on image change
     useEffect(() => {
-        setRotation(currentImage?.rotation || 0);
+        // setRotation(currentImage?.rotation || 0); // Removed for permanent rotation
         setZoom(1);
         setPan({ x: 0, y: 0 });
         setScanResults(null);
@@ -1139,7 +1214,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                             w: rect.width * scaleX,
                             h: rect.height * scaleY
                         },
-                        rotation: rotation
+                        rotation: 0
                     });
                     setExtractionResult(res.data);
                 } catch (serverErr) {
@@ -1158,40 +1233,10 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
     };
 
 
-    // Sync rotation when current image changes
-    useEffect(() => {
-        const img = images[currentIndex];
-        setRotation(img?.rotation || 0);
-    }, [currentIndex, images]);
-
-    const persistRotation = (newRotation) => {
-        const img = images[currentIndex];
-        if (!img || !img.itemId || !img.assetId) return;
-
-        // Clear existing timeout
-        if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-
-        // Update local object reference immediately (optimistic UI for navigation)
-        // Find the asset in the original item object to update it permanently for this session
-        if (item && item.assets) {
-            const asset = item.assets.find(a => String(a.id) === String(img.assetId));
-            if (asset) asset.rotation = newRotation;
-        }
-
-        // Also update the current derived image object just in case
-        img.rotation = newRotation;
-
-        // Debounce API call
-        saveTimeoutRef.current = setTimeout(() => {
-            api.patch(`/integrations/monday/items/${img.itemId}/assets/${img.assetId}`, { rotation: newRotation })
-                .catch(err => console.error("Failed to save rotation:", err));
-        }, 500);
-    };
-
     // Clean up timeout
     useEffect(() => {
         return () => {
-            if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+            // Removed timeout
         };
     }, []);
 
@@ -1230,22 +1275,52 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
         }
     };
 
-    const handleRotateCw = (e) => {
+    const handleRotateCw = async (e) => {
         e?.stopPropagation();
-        setRotation(r => {
-            const newR = r + 90;
-            persistRotation(newR);
-            return newR;
-        });
+        if (!currentImage?.isLocal && !currentImage?.localUrl) {
+            showToast("Can only rotate local images. Please sync first.", "error");
+            return;
+        }
+
+        try {
+            // Extract relative path from localUrl or proxyUrl
+            // Format: /api/v1/tools/files/monday_files/... -> monday_files/...
+            const url = currentImage.localUrl || currentImage.proxyUrl;
+            const path = url.split('/tools/files/')[1];
+
+            if (!path) throw new Error("Invalid file path");
+
+            await api.post('/tools/rotate', { file_path: path, angle: -90 }); // PIL -90 is CW
+            // showToast("Rotated CW", "success");
+            if (onRotationComplete) onRotationComplete();
+
+        } catch (err) {
+            console.error("Rotation failed", err);
+            showToast("Rotation failed", "error");
+        }
     };
 
-    const handleRotateCcw = (e) => {
+    const handleRotateCcw = async (e) => {
         e?.stopPropagation();
-        setRotation(r => {
-            const newR = r - 90;
-            persistRotation(newR);
-            return newR;
-        });
+        if (!currentImage?.isLocal && !currentImage?.localUrl) {
+            showToast("Can only rotate local images. Please sync first.", "error");
+            return;
+        }
+
+        try {
+            const url = currentImage.localUrl || currentImage.proxyUrl;
+            const path = url.split('/tools/files/')[1];
+
+            if (!path) throw new Error("Invalid file path");
+
+            await api.post('/tools/rotate', { file_path: path, angle: 90 }); // PIL 90 is CCW
+            // showToast("Rotated CCW", "success");
+            if (onRotationComplete) onRotationComplete();
+
+        } catch (err) {
+            console.error("Rotation failed", err);
+            showToast("Rotation failed", "error");
+        }
     };
 
 
@@ -1366,9 +1441,9 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                                                     setDragStart(null); setDragEnd(null);
                                                 } else {
                                                     setIsMagicMode(true);
-                                                    setRotation(0);
+                                                    // setRotation(0); // Removed
+                                                    setShowExtractMenu(false);
                                                 }
-                                                setShowExtractMenu(false);
                                             }}
                                             className={`flex items-center gap-3 px-3 py-3 rounded-lg text-sm text-left transition-colors ${isMagicMode ? 'bg-indigo-600 text-white' : 'text-gray-200 hover:bg-gray-800'}`}
                                         >
@@ -1502,12 +1577,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                                     `${(imageSize / 1024).toFixed(1)} KB`
                                 ) : 'Size Unknown'}
                             </span>
-                            {rotation !== 0 && (
-                                <>
-                                    <span className="w-px h-3 bg-white/20"></span>
-                                    <span>{rotation}┬░</span>
-                                </>
-                            )}
+
                             <span className="w-px h-3 bg-white/20"></span>
                             <span>{Math.round(zoom * 100)}%</span>
                         </div>
@@ -1575,97 +1645,89 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                         {/* Render ONLY current image */}
                         {/* Render ONLY current image */}
                         {currentImage ? (
-                            showImages ? (
-                                <div
-                                    className={`relative w-full h-full flex items-center justify-center transition-transform duration-200 ease-out origin-center
+                            <div
+                                className={`relative w-full h-full flex items-center justify-center transition-transform duration-200 ease-out origin-center
                                     ${isMagicMode ? 'cursor-crosshair' : (zoom > 1 ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : '')}`}
-                                    style={{ transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotation}deg) scale(${zoom})` }}
-                                    onMouseDown={(e) => {
-                                        if (isMagicMode) handleMagicMouseDown(e);
-                                        else handlePanMouseDown(e);
-                                    }}
-                                    onMouseMove={(e) => {
-                                        if (isPanning) handlePanMouseMove(e);
-                                    }}
-                                    onMouseUp={handlePanMouseUp}
-                                    onMouseLeave={handlePanMouseUp}
-                                >
-                                    <CachedImage
-                                        key={currentIndex}
-                                        file={currentImage}
-                                        proxyUrl={currentImage.proxyUrl}
-                                        originalUrl={currentImage.originalUrl}
-                                        usePublic={currentImage.usePublic}
-                                        className="block max-w-full max-h-full object-contain drop-shadow-2xl"
-                                        shouldLoad={true} // UX: Always load in Gallery mode
-                                        isLocal={currentImage.isLocal}
-                                        imgRef={imageRef}
-                                    />
+                                style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+                                onMouseDown={(e) => {
+                                    if (isMagicMode) handleMagicMouseDown(e);
+                                    else handlePanMouseDown(e);
+                                }}
+                                onMouseMove={(e) => {
+                                    if (isPanning) handlePanMouseMove(e);
+                                }}
+                                onMouseUp={handlePanMouseUp}
+                                onMouseLeave={handlePanMouseUp}
+                            >
+                                <CachedImage
+                                    key={`${currentIndex}-${refreshKey}`}
+                                    file={currentImage}
+                                    proxyUrl={currentImage.proxyUrl ? `${currentImage.proxyUrl}${currentImage.proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : null}
+                                    originalUrl={currentImage.originalUrl}
+                                    usePublic={currentImage.usePublic}
+                                    className="block max-w-full max-h-full object-contain drop-shadow-2xl"
+                                    shouldLoad={true} // UX: Always load in Gallery mode
+                                    isLocal={currentImage.isLocal}
+                                    imgRef={imageRef}
+                                />
 
-                                    {/* OVERLAYS inside Rotated Container */}
-                                    {scanResults && scanResults.map((code, idx) => {
-                                        if (!code.rect) return null;
-                                        const img = imageRef.current;
-                                        if (!img) return null;
+                                {/* OVERLAYS inside Rotated Container */}
+                                {scanResults && scanResults.map((code, idx) => {
+                                    if (!code.rect) return null;
+                                    const img = imageRef.current;
+                                    if (!img) return null;
 
-                                        // CALCULATE EXACT POSITION (Handling object-fit: contain via offsetLeft/Top)
-                                        // 1. Scale Ratio (Display / Natural)
-                                        const scaleX = img.width / img.naturalWidth;
-                                        const scaleY = img.height / img.naturalHeight;
+                                    // CALCULATE EXACT POSITION (Handling object-fit: contain via offsetLeft/Top)
+                                    // 1. Scale Ratio (Display / Natural)
+                                    const scaleX = img.width / img.naturalWidth;
+                                    const scaleY = img.height / img.naturalHeight;
 
-                                        // 2. Position: Image Offset in Container + (Natural Coord * Scale)
-                                        // The img.offsetLeft gives the gap caused by 'object-contain' centering.
-                                        // Since this `map` is rendered as a sibling to CachedImage (which fills the parent),
-                                        // relative to the parent, the image starts at img.offsetLeft/Top (assuming CachedImage is 0,0).
-                                        // Note: CachedImage is w-full h-full, so it aligns with parent.
-                                        // `img` is inside CachedImage. offsetLeft is relative to CachedImage (offsetParent).
-                                        // So this works perfectly.
+                                    // 2. Position: Image Offset in Container + (Natural Coord * Scale)
+                                    // The img.offsetLeft gives the gap caused by 'object-contain' centering.
+                                    // Since this `map` is rendered as a sibling to CachedImage (which fills the parent),
+                                    // relative to the parent, the image starts at img.offsetLeft/Top (assuming CachedImage is 0,0).
+                                    // Note: CachedImage is w-full h-full, so it aligns with parent.
+                                    // `img` is inside CachedImage. offsetLeft is relative to CachedImage (offsetParent).
+                                    // So this works perfectly.
 
-                                        // 2. Position: Image Offset in Container + (Natural Coord * Scale)
-                                        // CENTER POINT for Hotspot
-                                        const centerX = img.offsetLeft + (code.rect.x * scaleX) + ((code.rect.w * scaleX) / 2);
-                                        const centerY = img.offsetTop + (code.rect.y * scaleY) + ((code.rect.w * scaleX) / 2);
-                                        // Note: Using width for height in centerY calc? No, usage of H is cleaner, but let's stick to rect.h
-                                        const centerYFixed = img.offsetTop + (code.rect.y * scaleY) + ((code.rect.h * scaleY) / 2);
+                                    // 2. Position: Image Offset in Container + (Natural Coord * Scale)
+                                    // CENTER POINT for Hotspot
+                                    const centerX = img.offsetLeft + (code.rect.x * scaleX) + ((code.rect.w * scaleX) / 2);
+                                    const centerY = img.offsetTop + (code.rect.y * scaleY) + ((code.rect.w * scaleX) / 2);
+                                    // Note: Using width for height in centerY calc? No, usage of H is cleaner, but let's stick to rect.h
+                                    const centerYFixed = img.offsetTop + (code.rect.y * scaleY) + ((code.rect.h * scaleY) / 2);
 
-                                        const isAI = code.source === 'AI_GEMINI';
-                                        const bgColor = isAI ? 'bg-indigo-600' : 'bg-red-600';
-                                        const shadowColor = isAI ? 'shadow-[0_0_15px_rgba(79,70,229,0.6)]' : 'shadow-sm';
+                                    const isAI = code.source === 'AI_GEMINI';
+                                    const bgColor = isAI ? 'bg-indigo-600' : 'bg-red-600';
+                                    const shadowColor = isAI ? 'shadow-[0_0_15px_rgba(79,70,229,0.6)]' : 'shadow-sm';
 
-                                        return (
-                                            <div
-                                                key={idx}
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    navigator.clipboard.writeText(code.data);
-                                                    showToast(`Copied: ${code.data}`, "success");
-                                                }}
-                                                className={`absolute transform -translate-x-1/2 -translate-y-1/2 cursor-pointer z-50 group/spot flex items-center justify-center`}
-                                                style={{
-                                                    left: `${centerX}px`,
-                                                    top: `${centerYFixed}px`,
-                                                }}
-                                            >
-                                                {/* Hotspot Dot (Pulsing) */}
-                                                <div className={`relative flex items-center justify-center`}>
-                                                    <div className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${bgColor}`}></div>
-                                                    <div className={`relative inline-flex rounded-full px-3 py-1 text-xs font-bold text-white ${bgColor} ${shadowColor} border border-white/20 transition-transform hover:scale-110 items-center gap-1.5`}>
-                                                        {isAI && <span className="text-[10px]">Ô£¿</span>}
-                                                        <span className="max-w-[150px] truncate">{code.data}</span>
-                                                        <FiCopy className="opacity-0 group-hover/spot:opacity-100 transition-opacity w-3 h-3 ml-1" />
-                                                    </div>
+                                    return (
+                                        <div
+                                            key={idx}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                navigator.clipboard.writeText(code.data);
+                                                showToast(`Copied: ${code.data}`, "success");
+                                            }}
+                                            className={`absolute transform -translate-x-1/2 -translate-y-1/2 cursor-pointer z-50 group/spot flex items-center justify-center`}
+                                            style={{
+                                                left: `${centerX}px`,
+                                                top: `${centerYFixed}px`,
+                                            }}
+                                        >
+                                            {/* Hotspot Dot (Pulsing) */}
+                                            <div className={`relative flex items-center justify-center`}>
+                                                <div className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${bgColor}`}></div>
+                                                <div className={`relative inline-flex rounded-full px-3 py-1 text-xs font-bold text-white ${bgColor} ${shadowColor} border border-white/20 transition-transform hover:scale-110 items-center gap-1.5`}>
+                                                    {isAI && <span className="text-[10px]">Ô£¿</span>}
+                                                    <span className="max-w-[150px] truncate">{code.data}</span>
+                                                    <FiCopy className="opacity-0 group-hover/spot:opacity-100 transition-opacity w-3 h-3 ml-1" />
                                                 </div>
                                             </div>
-                                        );
-                                    })}
-                                </div>
-                            ) : (
-                                <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 select-none">
-                                    <FiImage className="w-32 h-32 mb-6 opacity-20" />
-                                    <p className="text-2xl font-light tracking-wide text-gray-200">Preview Disabled</p>
-                                    <p className="text-sm text-gray-500 mt-3 font-medium">Enable images to view full resolution</p>
-                                </div>
-                            )
+                                        </div>
+                                    );
+                                })}
+                            </div>
                         ) : (
                             <div className="text-gray-500 flex flex-col items-center">
                                 <FiImage className="w-16 h-16 mb-4 opacity-50" />
@@ -1878,6 +1940,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                             inline={true}
                             onItemUpdate={onItemUpdate}
                             editableColumns={editableColumns}
+                            refreshKey={refreshKey}
                         />
                     </div>
                 )
@@ -2085,7 +2148,7 @@ const ClearCacheModal = ({ onClose, onConfirm, boardName }) => {
 };
 
 // Component: Card Item with Carousel
-const CardItem = ({ item, onClick, onImageClick, showImages, optimizeImages, editableColumns = [], onUpdate = null, columnsMap = null, isEditMode = false, modifiedItems = null, cardColumns = [], cardActions = [] }) => {
+const CardItem = ({ item, onClick, onImageClick, showImages, optimizeImages, editableColumns = [], onUpdate = null, columnsMap = null, isEditMode = false, modifiedItems = null, cardColumns = [], cardActions = [], refreshKey }) => {
     const [currentImageIndex, setCurrentImageIndex] = useState(0);
     const images = getItemImages(item, optimizeImages);
     const hasMultiple = images.length > 1;
@@ -2160,9 +2223,9 @@ const CardItem = ({ item, onClick, onImageClick, showImages, optimizeImages, edi
                             className={`absolute inset-0 w-full h-full transition-opacity duration-300 ${idx === currentImageIndex ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}
                         >
                             <CachedImage
-                                key={`${item.id}-${idx}`}
+                                key={`${item.id}-${idx}-${refreshKey}`}
                                 file={img}
-                                proxyUrl={img.proxyUrl}
+                                proxyUrl={img.proxyUrl ? `${img.proxyUrl}${img.proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : null}
                                 originalUrl={img.originalUrl}
                                 usePublic={img.usePublic}
                                 isLocal={img.isLocal}
@@ -2429,7 +2492,8 @@ const MondayAppView = () => {
     // Alias for compatibility with existing logic
     const activeFilters = filters.filter(f => f.value && f.value.trim() !== '');
 
-    const [showImages, setShowImages] = useState(() => localStorage.getItem('monday_showImages') === 'true'); // Default to false if not set
+    // const [showImages, setShowImages] = useState(() => localStorage.getItem('monday_showImages') === 'true'); // State Removed. Always True.
+    const showImages = true;
     const [optimizeImages, setOptimizeImages] = useState(() => {
         const saved = localStorage.getItem('monday_optimizeImages');
         return saved === null ? true : saved === 'true'; // Default to true if not set
@@ -2448,6 +2512,7 @@ const MondayAppView = () => {
     const [showSortMenu, setShowSortMenu] = useState(false);
     const [cursor, setCursor] = useState(null);
     const [itemsLoading, setItemsLoading] = useState(false);
+    const [refreshKey, setRefreshKey] = useState(0); // For cache busting
     const [searchParams, setSearchParams] = useSearchParams();
 
     // Computed selected item from URL
@@ -3547,85 +3612,16 @@ const MondayAppView = () => {
                                 </div>
 
                                 {showSyncSettings && (
-                                    <div className="absolute top-full right-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-gray-100 z-[100] animate-fadeIn ring-1 ring-black ring-opacity-5 overflow-hidden">
-                                        <div className="bg-gray-50 px-4 py-2 border-b border-gray-100 flex justify-between items-center">
-                                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Sync Settings</span>
-                                        </div>
-
-                                        <div className="p-2 space-y-1">
-                                            <label className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors group">
-                                                <div className="flex flex-col">
-                                                    <span className="text-sm font-medium text-gray-700">Fetch Images</span>
-                                                    <span className="text-xs text-gray-500">Download files locally</span>
-                                                </div>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={showImages}
-                                                    onChange={(e) => setShowImages(e.target.checked)}
-                                                    className="rounded border-gray-300 text-indigo-600 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 h-4 w-4"
-                                                />
-                                            </label>
-
-                                            <label className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors group">
-                                                <div className="flex flex-col">
-                                                    <span className="text-sm font-medium text-gray-700">Keep Originals</span>
-                                                    <span className="text-xs text-gray-500">Save high-res copies</span>
-                                                </div>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={keepOriginals}
-                                                    onChange={(e) => {
-                                                        setKeepOriginals(e.target.checked);
-                                                        localStorage.setItem('monday_keepOriginals', e.target.checked);
-                                                    }}
-                                                    className="rounded border-gray-300 text-indigo-600 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 h-4 w-4"
-                                                />
-                                            </label>
-
-                                            <label className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors group">
-                                                <div className="flex flex-col">
-                                                    <span className="text-sm font-medium text-gray-700">Optimize Images</span>
-                                                    <span className="text-xs text-gray-500">Convert to WebP (Recommended)</span>
-                                                </div>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={optimizeImages}
-                                                    onChange={(e) => {
-                                                        setOptimizeImages(e.target.checked);
-                                                        localStorage.setItem('monday_optimizeImages', e.target.checked);
-                                                    }}
-                                                    className="rounded border-gray-300 text-indigo-600 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 h-4 w-4"
-                                                />
-                                            </label>
-
-                                            <div className="border-t border-gray-100 my-1"></div>
-
-                                            <label className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-orange-50 cursor-pointer transition-colors group">
-                                                <div className="flex flex-col">
-                                                    <span className="text-sm font-medium text-gray-700 group-hover:text-orange-700">Force Re-download</span>
-                                                    <span className="text-xs text-gray-500 group-hover:text-orange-600">Overwrite existing files</span>
-                                                </div>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={forceSyncImages}
-                                                    onChange={(e) => setForceSyncImages(e.target.checked)}
-                                                    className="rounded border-gray-300 text-orange-500 shadow-sm focus:border-orange-300 focus:ring focus:ring-orange-200 focus:ring-opacity-50 h-4 w-4"
-                                                />
-                                            </label>
-                                        </div>
-
-                                        <div className="bg-gray-50 p-2 border-t border-gray-100">
-                                            <button
-                                                onClick={() => {
-                                                    setShowSyncSettings(false);
-                                                    setShowClearCache(true);
-                                                }}
-                                                className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-red-600 hover:bg-red-100 transition-colors"
-                                            >
-                                                <FiTrash2 className="w-4 h-4" /> Clear Local Cache
-                                            </button>
-                                        </div>
-                                    </div>
+                                    <SyncMenu
+                                        optimizeImages={optimizeImages}
+                                        setOptimizeImages={setOptimizeImages}
+                                        keepOriginals={keepOriginals}
+                                        setKeepOriginals={setKeepOriginals}
+                                        forceSyncImages={forceSyncImages}
+                                        setForceSyncImages={setForceSyncImages}
+                                        onClearCache={() => setShowClearCache(true)}
+                                        onClose={() => setShowSyncSettings(false)}
+                                    />
                                 )}
                             </div>
 
@@ -3925,7 +3921,7 @@ const MondayAppView = () => {
                                             </thead>
                                             <tbody className="bg-white divide-y divide-gray-200">
                                                 {filteredItems.map(item => (
-                                                    <ItemRow key={item.id} item={item} columns={(boardItems[0]?.column_values || []).map(c => c.id)} onRowClick={setSelectedItem} showImages={showImages} optimizeImages={optimizeImages} editableColumns={editableColumns} onUpdate={handleUpdateColumn} columnsMap={columnsMap} isEditMode={isEditMode} modifiedItems={modifiedItems} />
+                                                    <ItemRow key={item.id} item={item} columns={(boardItems[0]?.column_values || []).map(c => c.id)} onRowClick={setSelectedItem} showImages={showImages} optimizeImages={optimizeImages} editableColumns={editableColumns} onUpdate={handleUpdateColumn} columnsMap={columnsMap} isEditMode={isEditMode} modifiedItems={modifiedItems} refreshKey={refreshKey} />
                                                 ))}
                                             </tbody>
                                         </table>
@@ -3998,6 +3994,8 @@ const MondayAppView = () => {
                         onPrev={handlePrevItem}
                         hasNext={filteredItemsList.length > 1}
                         hasPrev={filteredItemsList.length > 1}
+                        refreshKey={refreshKey}
+                        onRotationComplete={() => setRefreshKey(prev => prev + 1)}
                     />
                 )
             }

@@ -85,3 +85,89 @@ async def download_file(file_path: str) -> Any:
 
     debug_log("Serving File...")
     return FileResponse(target_path)
+
+@router.post("/rotate")
+async def rotate_image(payload: dict) -> Any:
+    """
+    Rotates an image file and its counterparts (optimized/original) permanently.
+    Payload: { "file_path": "monday_files/...", "angle": 90 }
+    """
+    import os
+    import glob
+    from pathlib import Path
+    from urllib.parse import unquote
+    from PIL import Image, ImageOps
+
+    file_path = payload.get("file_path")
+    angle = payload.get("angle", 0)
+
+    if not file_path:
+        raise HTTPException(status_code=400, detail="Missing file_path")
+
+    # 1. Resolve Paths
+    decoded_path = unquote(file_path)
+    base_dir = Path("assets").resolve()
+    target_path = (base_dir / decoded_path).resolve()
+
+    # 2. Security Check
+    try:
+        if not target_path.is_relative_to(base_dir):
+             raise HTTPException(status_code=403, detail="Access denied")
+    except AttributeError:
+        if not str(target_path).startswith(str(base_dir)):
+             raise HTTPException(status_code=403, detail="Access denied")
+             
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # 3. Identify Sibling Files (Original <-> Optimized)
+    # Naming convention:
+    # Original:  {name}.{ext}
+    # Optimized: opt_{name}.webp
+    
+    directory = target_path.parent
+    filename = target_path.name
+    files_to_rotate = {target_path} # Use set to avoid duplicates
+
+    try:
+        if filename.startswith("opt_") and filename.endswith(".webp"):
+            # We have the Optimized file. Find the Original.
+            # opt_NAME.webp -> NAME
+            base_name = filename[4:-5] # Strip 'opt_' (4) and '.webp' (5)
+            
+            # Find any file in dir that matches base_name.* (excluding opt_)
+            # We iterate manually to avoid shelling out
+            for f in directory.iterdir():
+                if f.is_file() and f.stem == base_name and not f.name.startswith("opt_"):
+                    files_to_rotate.add(f)
+                    
+        else:
+            # We have the Original (likely). Find the Optimized.
+            base_name = target_path.stem
+            opt_name = f"opt_{base_name}.webp"
+            opt_path = directory / opt_name
+            if opt_path.exists():
+                files_to_rotate.add(opt_path)
+
+        # 4. Perform Rotation on ALL found files
+        rotated_count = 0
+        for fpath in files_to_rotate:
+            try:
+                with Image.open(fpath) as img:
+                    # Expand ensures true rotation without cropping
+                    rotated = img.rotate(angle, expand=True)
+                    rotated.save(fpath)
+                    rotated_count += 1
+            except Exception as e:
+                print(f"Failed to rotate alias {fpath}: {e}")
+                # We continue trying others even if one fails
+                
+        return {
+            "status": "success", 
+            "message": f"Rotated {rotated_count} file(s)", 
+            "files": [f.name for f in files_to_rotate]
+        }
+
+    except Exception as e:
+        print(f"Rotation Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
