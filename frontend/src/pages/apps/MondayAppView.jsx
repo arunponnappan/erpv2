@@ -2498,6 +2498,15 @@ const MondayAppView = () => {
         const saved = localStorage.getItem('monday_optimizeImages');
         return saved === null ? true : saved === 'true'; // Default to true if not set
     });
+    // Grid Density State
+    const [gridColumns, setGridColumns] = useState(() => {
+        const saved = localStorage.getItem('monday_gridColumns');
+        return saved ? parseInt(saved, 10) : 4;
+    });
+
+    useEffect(() => {
+        localStorage.setItem('monday_gridColumns', gridColumns);
+    }, [gridColumns]);
     const [forceSyncImages, setForceSyncImages] = useState(false);
     const [keepOriginals, setKeepOriginals] = useState(() => {
         const saved = localStorage.getItem('monday_keepOriginals');
@@ -3574,6 +3583,26 @@ const MondayAppView = () => {
 
 
 
+
+                                {/* Grid Density Control (Only in Grid View) */}
+                                {viewMode === 'grid' && (
+                                    <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-white border border-gray-200 rounded-md shadow-sm h-9 mr-3 transition-all animate-fadeIn">
+                                        <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Cols</span>
+                                        <input
+                                            type="range"
+                                            min="2"
+                                            max="6"
+                                            step="1"
+                                            value={gridColumns}
+                                            onChange={(e) => setGridColumns(parseInt(e.target.value, 10))}
+                                            className="w-20 h-1.5 bg-gray-100 rounded-lg appearance-none cursor-pointer accent-indigo-600 hover:accent-indigo-500 transition-all"
+                                        />
+                                        <div className="w-4 text-center">
+                                            <span className="text-xs font-bold text-indigo-600">{gridColumns}</span>
+                                        </div>
+                                    </div>
+                                )}
+
                                 <button
                                     onClick={() => setViewMode('grid')}
                                     className={`p-2 rounded-md transition-all ${viewMode === 'grid' ? 'bg-white shadow text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
@@ -3858,29 +3887,53 @@ const MondayAppView = () => {
                         <>
                             {/* Grid View */}
                             {viewMode === 'grid' && (
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-6">
-                                    {filteredItems.map(item => (
-                                        <CardItem
-                                            key={item.id}
-                                            item={item}
-                                            onClick={(itm) => {
-                                                setSelectedItem(itm);
-                                                // setGalleryItem(itm); // Removed to prevent race condition. Effect will open it.
-                                            }}
-                                            onImageClick={(itm, idx) => {
-                                                setSelectedItem(itm, idx);
-                                            }}
-                                            showImages={showImages}
-                                            optimizeImages={optimizeImages}
-                                            editableColumns={editableColumns}
-                                            onUpdate={handleUpdateColumn}
-                                            columnsMap={columnsMap}
-                                            isEditMode={isEditMode}
-                                            cardColumns={config?.card_columns?.[activeBoardId] || []}
-                                            modifiedItems={modifiedItems}
-                                            cardActions={config?.card_actions?.[activeBoardId] || []}
-                                        />
-                                    ))}
+                                <div
+                                    className="grid gap-6 transition-all duration-300"
+                                    style={{
+                                        gridTemplateColumns: `repeat(${Math.max(1, gridColumns)}, minmax(0, 1fr))`
+                                        // Mobile fallback handled by responsiveness helper if needed, but minmax(0, 1fr) is usually safe.
+                                        // To be safe for mobile, we can use a class for small screens or media query in style.
+                                        // Let's use standard classes for small, dynamic for md+
+                                    }}
+                                >
+                                    {/* Override specifically for larger screens to use dynamic columns, force 1 col on XS/SM */}
+                                    {/* We use a specific inline style controlled by media query logic or just rely on min-width */}
+                                    <style>{`
+                                        @media (min-width: 768px) {
+                                            .grid-dynamic-cols {
+                                                grid-template-columns: repeat(${gridColumns}, minmax(0, 1fr)) !important;
+                                            }
+                                        }
+                                        @media (max-width: 767px) {
+                                            .grid-dynamic-cols {
+                                                grid-template-columns: repeat(1, minmax(0, 1fr)) !important;
+                                            }
+                                        }
+                                     `}</style>
+                                    <div className="contents grid-dynamic-cols"> {/* Wrapper to apply styles cleanly */}
+                                        {filteredItems.map(item => (
+                                            <CardItem
+                                                key={item.id}
+                                                item={item}
+                                                onClick={(itm) => {
+                                                    setSelectedItem(itm);
+                                                    // setGalleryItem(itm); // Removed to prevent race condition. Effect will open it.
+                                                }}
+                                                onImageClick={(itm, idx) => {
+                                                    setSelectedItem(itm, idx);
+                                                }}
+                                                showImages={showImages}
+                                                optimizeImages={optimizeImages}
+                                                editableColumns={editableColumns}
+                                                onUpdate={handleUpdateColumn}
+                                                columnsMap={columnsMap}
+                                                isEditMode={isEditMode}
+                                                cardColumns={config?.card_columns?.[activeBoardId] || []}
+                                                modifiedItems={modifiedItems}
+                                                cardActions={config?.card_actions?.[activeBoardId] || []}
+                                            />
+                                        ))}
+                                    </div>
                                 </div>
                             )}
 
@@ -4066,9 +4119,11 @@ const MondayAppView = () => {
             }
 
             {/* Job History Panel */}
-            {showJobHistory && (
-                <JobHistoryPanel onClose={() => setShowJobHistory(false)} />
-            )}
+            {
+                showJobHistory && (
+                    <JobHistoryPanel onClose={() => setShowJobHistory(false)} />
+                )
+            }
         </div >
     );
 };
