@@ -65,5 +65,6 @@ class MondayBarcodeConfig(SQLModel, table=True):
     sort_column_id: Optional[str] = Field(default="name") # Default sort column
     sort_direction: str = Field(default="asc") # asc or desc
     display_column_ids: List[str] = Field(default=[], sa_column=Column(JSON))
+    is_mobile_active: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

@@ -26,6 +26,7 @@ class BarcodeConfigDTO(BaseModel):
     sort_column_id: Optional[str] = "name"
     sort_direction: Optional[str] = "asc"
     display_column_ids: List[str]
+    is_mobile_active: bool = True
 
 def get_monday_service(
     session: Session = Depends(get_session),
@@ -225,6 +226,29 @@ async def get_boards(
         print(f"ERROR in get_boards: {e}")
         raise HTTPException(status_code=500, detail=f"Backend Error: {str(e)}")
 
+@router.delete("/boards/{board_id}")
+async def delete_board_data(
+    board_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.get_current_user),
+    service: MondayService = Depends(get_monday_service)
+) -> Any:
+    """
+    Delete a board and all its local data (items, assets, config).
+    """
+    # Only admins can delete? Or anyone with access? Let's restrict to admins for safety for now, 
+    # OR those who have explicit access (but deleting for EVERYONE is dangerous).
+    # Let's enforce Admin only for data deletion.
+    if str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role) not in ["super_admin", "admin"]:
+         raise HTTPException(status_code=403, detail="Only admins can delete board data")
+         
+    try:
+        service.delete_board(session, board_id)
+        return {"status": "success", "message": f"Board {board_id} deleted"}
+    except Exception as e:
+        print(f"Delete Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/boards/{board_id}/sync")
 async def sync_board(
     board_id: int,
@@ -396,6 +420,83 @@ async def update_item_asset(
         print(f"Error updating asset: {e}")
         raise HTTPException(status_code=500, detail="Failed to save asset metadata")
 
+    return {"status": "success", "asset": asset_data}
+
+@router.post("/items/{item_id}/assets/{asset_id}/rotate")
+async def rotate_item_asset(
+    item_id: int,
+    asset_id: str,
+    payload: Dict[str, Any], 
+    session: Session = Depends(get_session)
+):
+    """
+    Physically rotate an asset file (and its optimized version) on server.
+    Payload: { "angle": 90 }  (Positive = Clockwise, Negative = Counter-Clockwise)
+    """
+    import os
+    try:
+        from PIL import Image
+    except ImportError:
+        raise HTTPException(status_code=500, detail="Pillow not installed on backend")
+
+    # 1. Fetch Item & Asset
+    item = session.exec(select(MondayItem).where(MondayItem.id == item_id)).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+        
+    if asset_id not in item.assets:
+        raise HTTPException(status_code=404, detail="Asset not found on item")
+    
+    asset = item.assets[asset_id]
+    angle = payload.get("angle", 0)
+    
+    if angle == 0:
+        return {"status": "success", "message": "No rotation needed"}
+
+    # Helper to rotate a single file
+    def rotate_file(path_str):
+        if not path_str: return False
+        
+        # Clean path logic similar to extraction
+        clean_p = path_str.lstrip("/\\")
+        abs_p = os.path.abspath(clean_p)
+        
+        if not os.path.exists(abs_p):
+            print(f"Rotate: File not found {abs_p}")
+            return False
+            
+        try:
+            with Image.open(abs_p) as img:
+                # Pillow rotate is CCW. UI sends "90" for CW.
+                # If we want 90deg CW, we rotate -90.
+                rotated = img.rotate(-angle, expand=True)
+                rotated.save(abs_p)
+                print(f"Rotated {abs_p} by {-angle}")
+                return True
+        except Exception as e:
+            print(f"Rotate Error for {abs_p}: {e}")
+            return False
+
+    # 2. Rotate Original
+    did_rotate_orig = rotate_file(asset.get("local_path"))
+    
+    # 3. Rotate Optimized (if exists)
+    did_rotate_opt = rotate_file(asset.get("optimized_path"))
+    
+    if not did_rotate_orig and not did_rotate_opt:
+         raise HTTPException(status_code=404, detail="Local asset files not found to rotate")
+
+    # 4. RESET Metadata Rotation to 0
+    # Since we physically rotated the file, we don't want the frontend to apply CSS rotation anymore.
+    new_assets = dict(item.assets)
+    asset_data = dict(new_assets[asset_id])
+    asset_data["rotation"] = 0
+    new_assets[asset_id] = asset_data
+    
+    item.assets = new_assets
+    session.add(item)
+    session.commit()
+    
     return {"status": "success", "asset": asset_data}
 
 
@@ -982,9 +1083,22 @@ async def update_item_barcode(
 async def get_barcode_config(
     session: Session = Depends(get_session),
     current_user: User = Depends(deps.get_current_user)
-) -> List[MondayBarcodeConfig]:
+) -> Any:
     """Get all barcode configurations."""
-    return session.exec(select(MondayBarcodeConfig)).all()
+    from fastapi.responses import JSONResponse
+    try:
+        if not current_user.company_id:
+             return JSONResponse(content={})
+             
+        # Return the first config found for now, or empty list
+        configs = session.exec(select(MondayBarcodeConfig)).all()
+        # Frontend Expects an Array!
+        return configs if configs else []
+    except Exception as e:
+        print(f"DEBUG: Error in get_barcode_config (routes.py): {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(content={})
 
 @router.post("/config/barcode")
 async def save_barcode_config(
@@ -1019,7 +1133,9 @@ async def save_barcode_config(
         search_column_id=payload.search_column_id,
         sort_column_id=payload.sort_column_id,
         sort_direction=payload.sort_direction,
-        display_column_ids=payload.display_column_ids
+
+        display_column_ids=payload.display_column_ids,
+        is_mobile_active=payload.is_mobile_active
     )
     session.add(config)
     session.commit()
@@ -1060,8 +1176,14 @@ async def save_barcode_config(
         print(f"[CONFIG] Auto-Sync Job Created: {job_id} (Background Task Started)", flush=True)
     except Exception as e:
          print(f"[CONFIG] Auto-Sync Trigger Failed: {e}", flush=True)
+         job_id = None
 
-    return {"status": "success", "config": config, "sync_triggered": True}
+    return {
+        "status": "success", 
+        "config": config, 
+        "sync_triggered": True,
+        "job_id": str(job_id) if job_id else None
+    }
 
 
 @router.delete("/config/barcode")

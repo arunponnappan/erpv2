@@ -58,3 +58,4 @@ class JobRoleRead(JobRoleBase):
     id: int
 
 
+

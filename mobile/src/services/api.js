@@ -43,9 +43,9 @@ export const setApiBaseUrl = async (url) => {
 // const DEFAULT_API_URL = 'https://backend.abuamarllc.com''http://192.168.20.22:8000';
 
 // Local Development URL (Replace with your computer's IP for Expo Go)
-// Local Development URL (Replace with your computer's IP for Expo Go)
-// Found IPs: 10.0.1.186 (WiFi), 10.11.12.113 (Ethernet)
-const DEFAULT_API_URL = 'https://backend.abuamarllc.com'; // Production URL
+// Local Development URL (Auto-detected Host PC IP on Hotspot)
+const DEFAULT_API_URL = 'http://192.168.137.1:8000';
+// const DEFAULT_API_URL = 'https://backend.abuamarllc.com'; // Production URL
 
 export const loadApiBaseUrl = async () => {
     try {
@@ -86,8 +86,8 @@ api.interceptors.request.use(
 api.interceptors.response.use(
     (response) => response,
     async (error) => {
-        if (error.response && error.response.status === 401) {
-            // Token expired or invalid
+        if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+            // Token expired, invalid, or forbidden (wrong env)
             await SecureStore.deleteItemAsync('access_token');
             notifyAuthError();
         }

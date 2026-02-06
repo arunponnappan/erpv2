@@ -79,6 +79,10 @@ const marketplaceService = {
             });
             return response.data;
         },
+        updateAsset: async (itemId, assetId, data) => {
+            const response = await api.patch(`/integrations/monday/items/${itemId}/assets/${assetId}`, data);
+            return response.data;
+        },
         syncBoard: async (boardId, settings = {}, onProgress) => {
             const token = localStorage.getItem('token');
             const baseURL = api.defaults.baseURL || 'http://127.0.0.1:8000/api/v1';

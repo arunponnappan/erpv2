@@ -41,8 +41,9 @@ const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] })
         setMatchType('contains');
     };
 
-    const renderChip = (label, isSelected, onPress) => (
+    const renderChip = (label, isSelected, onPress, key) => (
         <TouchableOpacity
+            key={key}
             style={[styles.chip, isSelected && styles.chipActive]}
             onPress={onPress}
         >
@@ -77,7 +78,8 @@ const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] })
                                     renderChip(
                                         col.title || col.id,
                                         sortField === col.id,
-                                        () => setSortField(col.id)
+                                        () => setSortField(col.id),
+                                        col.id // Pass key
                                     )
                                 ))}
                             </View>

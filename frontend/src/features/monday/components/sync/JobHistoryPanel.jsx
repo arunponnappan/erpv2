@@ -5,7 +5,7 @@ import api from '../../../../services/api';
 /**
  * Job History Panel - Shows sync job queue and history
  */
-const JobHistoryPanel = ({ onClose }) => {
+const JobHistoryPanel = ({ onClose, isOpen }) => {
     const [jobs, setJobs] = useState([]);
     const [loading, setLoading] = useState(true);
     const [autoRefresh, setAutoRefresh] = useState(false); // Default to FALSE to stop "infinite" logs
@@ -23,8 +23,10 @@ const JobHistoryPanel = ({ onClose }) => {
 
     // Initial fetch
     useEffect(() => {
-        fetchJobs();
-    }, []);
+        if (isOpen) {
+            fetchJobs();
+        }
+    }, [isOpen]);
 
     // Auto-refresh interval (User enabled OR Active Jobs present)
     useEffect(() => {
@@ -92,7 +94,7 @@ const JobHistoryPanel = ({ onClose }) => {
     const completedJobs = jobs.filter(j => j.status === 'complete' || j.status === 'failed');
 
     return (
-        <div className="fixed inset-y-0 right-0 w-96 bg-white dark:bg-gray-900 shadow-2xl z-50 flex flex-col">
+        <div className={`fixed inset-y-0 right-0 w-96 bg-white dark:bg-gray-900 shadow-2xl z-50 flex flex-col transform transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-indigo-600 to-purple-600 text-white">
                 <div>

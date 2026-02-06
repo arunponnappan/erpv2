@@ -7,7 +7,7 @@ import { useLayout } from '../../context/LayoutContext';
 import { useDebug } from '../../context/DebugContext';
 import { FiMenu, FiChevronRight, FiChevronLeft, FiChevronDown, FiChevronUp, FiAlertCircle, FiLoader, FiX, FiDownload, FiExternalLink, FiGrid, FiList, FiLogOut, FiFilter, FiSearch, FiImage, FiPlus, FiTrash2, FiZap, FiRefreshCw, FiArrowUp, FiArrowDown, FiEdit2, FiCheck, FiSettings, FiCpu, FiDownloadCloud, FiRotateCw, FiRotateCcw, FiCrop, FiCopy, FiZoomIn, FiZoomOut, FiLock, FiSidebar, FiClock } from 'react-icons/fi';
 import JobHistoryPanel from '../../features/monday/components/sync/JobHistoryPanel';
-import SyncMenu from '../../features/monday/components/sync/SyncMenu';
+
 import { useMondaySync } from '../../features/monday/hooks/useMondaySync';
 import { getProxyUrl } from '../../features/monday/utils/imageHelpers';
 import syncService from '../../features/monday/services/syncService';
@@ -15,7 +15,7 @@ import syncService from '../../features/monday/services/syncService';
 // --- SHARED HELPERS & COMPONENTS ---
 
 // Component to fetch image to local blob with progress
-const CachedImage = ({ file, proxyUrl, originalUrl, usePublic, className, compact = false, shouldLoad = true, isLocal = false, style = {}, imgRef }) => {
+const CachedImage = ({ file, proxyUrl, originalUrl, usePublic, className, compact = false, shouldLoad = true, isLocal = false, style = {}, imgRef, optimizeImages = false }) => {
     // Ensure we have a ref to check 'complete' status, even if parent didn't pass one
     const localRef = useRef(null);
     const resolvedRef = imgRef || localRef;
@@ -155,7 +155,11 @@ const CachedImage = ({ file, proxyUrl, originalUrl, usePublic, className, compac
         }
     };
 
-    const imgSrc = effectiveIsLocal ? getAbsoluteUrl(proxyUrl) : (blobUrl || originalUrl);
+    const imgSrcBase = (optimizeImages && file?.optimized_path)
+        ? getAbsoluteUrl(file.optimized_path)
+        : (effectiveIsLocal ? getAbsoluteUrl(proxyUrl) : (blobUrl || originalUrl));
+
+    const imgSrc = (imgSrcBase && file?._ts) ? `${imgSrcBase}${imgSrcBase.includes('?') ? '&' : '?'}t=${file._ts}` : imgSrcBase;
 
     if (error) {
         return (
@@ -274,11 +278,13 @@ const getItemImages = (item, optimize = false, targetColumnId = null) => {
                     for (const f of parsed.files) {
                         if (f.name.match(/\.(jpg|jpeg|png|gif|webp)$/i) || f.fileType === 'ASSET') {
                             // Resolve URL logic
+                            // Initialize variables
                             let originalUrl = f.url || f.public_url;
                             let localUrl = null;
                             let usePublic = false;
                             let size = Number(f.size || f.file_size || 0);
                             let rotation = 0;
+                            let _ts = null; // Declare _ts here
 
                             let localOriginalUrl = null;
                             let localOptimizedUrl = null;
@@ -316,11 +322,11 @@ const getItemImages = (item, optimize = false, targetColumnId = null) => {
                                         } catch (e) { return null; }
                                     };
 
-                                    if (asset.local_url) {
-                                        localOriginalUrl = getProxyPath(asset.local_url);
+                                    if (asset.local_path || asset.local_url) {
+                                        localOriginalUrl = getProxyPath(asset.local_path || asset.local_url);
                                     }
-                                    if (asset.optimized_url) {
-                                        localOptimizedUrl = getProxyPath(asset.optimized_url);
+                                    if (asset.optimized_path || asset.optimized_url) {
+                                        localOptimizedUrl = getProxyPath(asset.optimized_path || asset.optimized_url);
                                     }
 
                                     // Determine preferred local URL for display
@@ -337,6 +343,11 @@ const getItemImages = (item, optimize = false, targetColumnId = null) => {
                                     if (asset.rotation) {
                                         rotation = Number(asset.rotation);
                                     }
+
+                                    // Capture timestamp if available (for cache busting)
+                                    if (asset._ts || (asset.assets && asset.assets._ts)) {
+                                        _ts = asset._ts || asset.assets._ts;
+                                    }
                                 }
                             }
 
@@ -346,7 +357,7 @@ const getItemImages = (item, optimize = false, targetColumnId = null) => {
                                 ? localUrl
                                 : (originalUrl ? `${api.defaults.baseURL}/integrations/monday/proxy?url=${encodeURIComponent(originalUrl)}${usePublic ? '&skip_auth=true' : ''}${optimizeParam}` : null);
 
-                            images.push({ ...f, proxyUrl, originalUrl, usePublic, isLocal: !!localUrl, size, localOriginalUrl, localOptimizedUrl, rotation, itemId: item.id });
+                            images.push({ ...f, proxyUrl, originalUrl, usePublic, isLocal: !!localUrl, size, localOriginalUrl, localOptimizedUrl, rotation, itemId: item.id, _ts });
                         }
                     }
                 }
@@ -892,7 +903,7 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
 };
 
 // Component: Full Screen Image Gallery Modal
-const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsMap, onItemUpdate, editableColumns, onNext, onPrev, hasNext, hasPrev, refreshKey, onRotationComplete }) => {
+const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsMap, onItemUpdate, onAssetUpdate, editableColumns, onNext, onPrev, hasNext, hasPrev, refreshKey, onRotationComplete, enterpriseSync, keepOriginals }) => {
     const [currentIndex, setCurrentIndex] = useState(item?.initialIndex || 0);
     const [showDownloadMenu, setShowDownloadMenu] = useState(false);
     const [showExtractMenu, setShowExtractMenu] = useState(false); // New state for Smart Tools dropdown
@@ -1066,6 +1077,41 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
     const dragStartRef = useRef(null);
     const dragEndRef = useRef(null);
 
+    // --- Fetch Barcode Config ---
+    const fetchBarcodeConfig = async () => {
+        try {
+            const res = await marketplaceService.monday.getBarcodeConfig();
+            if (res.data) {
+                // Find config for this board
+                const myConfig = res.data.find(c => String(c.board_id) === String(item.boardId)); // Assuming item has boardId
+                // setBarcodeConfig(myConfig); // This state is in MondayAppView, not here
+            }
+        } catch (e) {
+            console.error("Failed to load barcode config", e);
+        }
+    };
+
+    // Load initial data
+    useEffect(() => {
+        if (!item?.boardId) return;
+        // fetchBarcodeConfig(); // This should be done in the parent component (MondayAppView)
+
+        // Auto-refresh items
+        // const interval = setInterval(() => {
+        //     if (!isEditMode && !enterpriseSync.isSyncing) {
+        //         // Background refresh disabled for now to avoid flickering
+        //         // fetchBoardItems(boardId);
+        //     }
+        // }, 30000);
+        // return () => clearInterval(interval);
+    }, [item?.boardId]);
+
+    const handleSaveConfig = async (newConfig) => {
+        await marketplaceService.monday.saveBarcodeConfig(newConfig);
+        // showToast...
+        // fetchBarcodeConfig(); // Refresh
+        // handleSync(); // Auto-Sync to apply changes
+    };
     // Global Drag Listeners
     useEffect(() => {
         const handleGlobalMouseMove = (e) => {
@@ -1181,9 +1227,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                     formData.append('file', blob, 'extract.png');
 
                     try {
-                        const res = await api.post('/api/v1/tools/extract', formData, {
-                            headers: { 'Content-Type': 'multipart/form-data' }
-                        });
+                        const res = await marketplaceService.monday.extractFile(formData);
                         setExtractionResult(res.data);
                     } catch (err) {
                         console.error("Extraction failed", err);
@@ -1207,7 +1251,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                 }
 
                 try {
-                    const res = await api.post(`/integrations/monday/items/${currentImg.itemId}/assets/${currentImg.assetId}/extract`, {
+                    const res = await marketplaceService.monday.extractImage(currentImg.itemId, currentImg.assetId, {
                         crop: {
                             x: rect.x * scaleX,
                             y: rect.y * scaleY,
@@ -1277,49 +1321,61 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
 
     const handleRotateCw = async (e) => {
         e?.stopPropagation();
-        if (!currentImage?.isLocal && !currentImage?.localUrl) {
-            showToast("Can only rotate local images. Please sync first.", "error");
-            return;
+        if (!currentImage?.isLocal && !currentImage?.usePublic) {
+            if (!currentImage.isLocal) {
+                showToast("Can only rotate local synched images.", "error");
+                return;
+            }
         }
 
         try {
-            // Extract relative path from localUrl or proxyUrl
-            // Format: /api/v1/tools/files/monday_files/... -> monday_files/...
-            const url = currentImage.localUrl || currentImage.proxyUrl;
-            const path = url.split('/tools/files/')[1];
+            // New Endpoint for Physical Rotation
+            const res = await api.post(`/integrations/monday/items/${currentImage.itemId}/assets/${currentImage.assetId || currentImage.id}/rotate`, { angle: 90 });
 
-            if (!path) throw new Error("Invalid file path");
-
-            await api.post('/tools/rotate', { file_path: path, angle: -90 }); // PIL -90 is CW
-            // showToast("Rotated CW", "success");
-            if (onRotationComplete) onRotationComplete();
+            // Check success
+            if (res.data.status === 'success') {
+                const timestamp = Date.now();
+                // Update local state: Reset rotation to 0, add timestamp to force reload
+                if (onAssetUpdate) {
+                    onAssetUpdate(currentImage.itemId, currentImage.assetId || currentImage.id, {
+                        rotation: 0,
+                        _ts: timestamp // Helper to trigger cache bust in URL generation
+                    });
+                }
+                if (onRotationComplete) onRotationComplete();
+            }
 
         } catch (err) {
             console.error("Rotation failed", err);
-            showToast("Rotation failed", "error");
+            showToast("Rotation failed: " + (err.message || "Unknown error"), "error");
         }
     };
 
     const handleRotateCcw = async (e) => {
         e?.stopPropagation();
-        if (!currentImage?.isLocal && !currentImage?.localUrl) {
-            showToast("Can only rotate local images. Please sync first.", "error");
+        if (!currentImage?.isLocal) {
+            showToast("Can only rotate local synched images.", "error");
             return;
         }
 
         try {
-            const url = currentImage.localUrl || currentImage.proxyUrl;
-            const path = url.split('/tools/files/')[1];
+            // New Endpoint for Physical Rotation
+            const res = await api.post(`/integrations/monday/items/${currentImage.itemId}/assets/${currentImage.assetId || currentImage.id}/rotate`, { angle: -90 });
 
-            if (!path) throw new Error("Invalid file path");
-
-            await api.post('/tools/rotate', { file_path: path, angle: 90 }); // PIL 90 is CCW
-            // showToast("Rotated CCW", "success");
-            if (onRotationComplete) onRotationComplete();
+            if (res.data.status === 'success') {
+                const timestamp = Date.now();
+                if (onAssetUpdate) {
+                    onAssetUpdate(currentImage.itemId, currentImage.assetId || currentImage.id, {
+                        rotation: 0,
+                        _ts: timestamp
+                    });
+                }
+                if (onRotationComplete) onRotationComplete();
+            }
 
         } catch (err) {
             console.error("Rotation failed", err);
-            showToast("Rotation failed", "error");
+            showToast("Rotation failed: " + (err.message || "Unknown error"), "error");
         }
     };
 
@@ -1508,7 +1564,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                             {showDownloadMenu && (
                                 <>
                                     <div className="fixed inset-0 z-[60]" onClick={() => setShowDownloadMenu(false)}></div>
-                                    <div className="absolute top-12 right-0 w-56 bg-white rounded-lg shadow-xl z-[70] overflow-hidden py-1 border border-gray-200 animate-in fade-in zoom-in-95 duration-100">
+                                    <div className="absolute top-12 right-0 w-56 bg-white rounded-lg shadow-xl z-[70] overflow-hidden py-1 border border-gray-200 animate-in fade-in zoom-in-95 duration-200">
                                         <button
                                             onClick={() => { handleForceDownload(currentImage?.localOriginalUrl || currentImage?.originalUrl, currentImage?.name); setShowDownloadMenu(false); }}
                                             className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-3 text-gray-700 text-sm"
@@ -1522,30 +1578,22 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                                             </div>
                                         </button>
 
-                                        {currentImage?.localOptimizedUrl ? (
+                                        {currentImage?.localOptimizedUrl && (
                                             <button
-                                                onClick={() => {
-                                                    handleForceDownload(currentImage.localOptimizedUrl, `opt_${currentImage.name}.webp`);
-                                                    setShowDownloadMenu(false);
-                                                }}
-                                                className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center justify-between group transition-colors border-t border-gray-100"
+                                                onClick={() => { handleForceDownload(currentImage.localOptimizedUrl, `optimized_${currentImage?.name}`); setShowDownloadMenu(false); }}
+                                                className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-3 text-gray-700 text-sm border-t border-gray-100"
                                             >
-                                                <span className="flex flex-col">
-                                                    <span className="font-medium text-sm text-gray-900">Optimized</span>
-                                                    <span className="text-xs text-gray-500">WebP ÔÇó Smaller Size</span>
-                                                </span>
-                                                <FiCheck className="text-teal-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                                            </button>
-                                        ) : (
-                                            optimizeImages && (
-                                                <div className="w-full text-left px-4 py-3 bg-gray-50/50 flex items-center justify-between border-t border-gray-100 cursor-not-allowed opacity-60">
-                                                    <span className="flex flex-col">
-                                                        <span className="font-medium text-sm text-gray-400">Optimized</span>
-                                                        <span className="text-xs text-gray-400">Processing / Unavailable</span>
+                                                <FiZap className="w-4 h-4 text-indigo-600" />
+                                                <div className="flex flex-col">
+                                                    <span>Optimized (Web)</span>
+                                                    <span className="text-xs text-gray-400 font-normal">
+                                                        Faster download
                                                     </span>
                                                 </div>
-                                            )
+                                            </button>
                                         )}
+
+
                                     </div>
                                 </>
                             )}
@@ -1606,7 +1654,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                     </button>
 
                     {/* Vertical Zoom Slider */}
-                    <div className="absolute right-20 top-1/2 transform -translate-y-1/2 z-30 hidden md:flex flex-col items-center gap-2 mr-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                    <div className="absolute right-24 top-1/2 transform -translate-y-1/2 z-30 flex flex-col items-center gap-2 transition-opacity duration-300">
                         <div className="bg-black/40 backdrop-blur-md p-2 rounded-full border border-white/10 flex flex-col items-center gap-3 shadow-xl">
                             <button onClick={handleZoomIn} className="p-2 hover:bg-white/20 rounded-full text-white transition-colors" title="Zoom In">
                                 <FiZoomIn className="w-4 h-4" />
@@ -1638,6 +1686,10 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                             >
                                 {Math.round(zoom * 100)}%
                             </button>
+
+                            <div className="w-full h-px bg-white/20 my-1"></div>
+
+
                         </div>
                     </div>
 
@@ -1648,7 +1700,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                             <div
                                 className={`relative w-full h-full flex items-center justify-center transition-transform duration-200 ease-out origin-center
                                     ${isMagicMode ? 'cursor-crosshair' : (zoom > 1 ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : '')}`}
-                                style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+                                style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom}) rotate(${currentImage.rotation || 0}deg)` }}
                                 onMouseDown={(e) => {
                                     if (isMagicMode) handleMagicMouseDown(e);
                                     else handlePanMouseDown(e);
@@ -1659,6 +1711,11 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                                 onMouseUp={handlePanMouseUp}
                                 onMouseLeave={handlePanMouseUp}
                             >
+
+
+
+
+
                                 <CachedImage
                                     key={`${currentIndex}-${refreshKey}`}
                                     file={currentImage}
@@ -1669,6 +1726,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                                     shouldLoad={true} // UX: Always load in Gallery mode
                                     isLocal={currentImage.isLocal}
                                     imgRef={imageRef}
+                                    optimizeImages={optimizeImages}
                                 />
 
                                 {/* OVERLAYS inside Rotated Container */}
@@ -1948,8 +2006,6 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
         </div >
     );
 };
-
-
 
 // Component: Tag Input for Filters
 const TagInput = ({ value, onChange, placeholder }) => {
@@ -2492,8 +2548,14 @@ const MondayAppView = () => {
     // Alias for compatibility with existing logic
     const activeFilters = filters.filter(f => f.value && f.value.trim() !== '');
 
-    // const [showImages, setShowImages] = useState(() => localStorage.getItem('monday_showImages') === 'true'); // State Removed. Always True.
-    const showImages = true;
+    const [showImages, setShowImages] = useState(() => {
+        const saved = localStorage.getItem('monday_showImages');
+        return saved === null ? true : saved === 'true';
+    });
+
+    useEffect(() => {
+        localStorage.setItem('monday_showImages', showImages);
+    }, [showImages]);
     const [optimizeImages, setOptimizeImages] = useState(() => {
         const saved = localStorage.getItem('monday_optimizeImages');
         return saved === null ? true : saved === 'true'; // Default to true if not set
@@ -2518,7 +2580,15 @@ const MondayAppView = () => {
     const [boards, setBoards] = useState([]);
     const [activeBoardId, setActiveBoardId] = useState(null);
     const [boardItems, setBoardItems] = useState([]);
+    const [showJobHistory, setShowJobHistory] = useState(false);
+
+
+    // Barcode Config State
+
+
     const [showSortMenu, setShowSortMenu] = useState(false);
+    const [showSyncMenu, setShowSyncMenu] = useState(false);
+    const [showBoardSelector, setShowBoardSelector] = useState(false); // Header Board Selector
     const [cursor, setCursor] = useState(null);
     const [itemsLoading, setItemsLoading] = useState(false);
     const [refreshKey, setRefreshKey] = useState(0); // For cache busting
@@ -2571,7 +2641,7 @@ const MondayAppView = () => {
                 return;
             }
 
-            // If gallery is closed, and we have a selectedItem that matches the one we JUST synced (and presumably closed), 
+            // If gallery is closed, and we have a selectedItem that matches the one we JUST synced (and presumably closed),
             // DON'T re-open it. This handles the Close Race.
             if (!isGalleryOpen && isSameAsLastSynced) {
                 return;
@@ -2676,7 +2746,7 @@ const MondayAppView = () => {
     const galleryItemRef = useRef(galleryItem); // Ref to access state inside event listener
     const [showExitDialog, setShowExitDialog] = useState(false);
     const [showClearCache, setShowClearCache] = useState(false);
-    const [showJobHistory, setShowJobHistory] = useState(false);
+    // const [showJobHistory, setShowJobHistory] = useState(false); // Already declared above
     // Enterprise Sync Hook
     const enterpriseSync = useMondaySync(activeBoardId);
 
@@ -2689,24 +2759,7 @@ const MondayAppView = () => {
     // State definitions moved to top
 
     // Sync Menu State
-
-    // Sync Menu State
-    const [showSyncSettings, setShowSyncSettings] = useState(false);
     const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => localStorage.getItem('monday_sidebarCollapsed') === 'true');
-    const syncMenuRef = useRef(null);
-
-    // Click outside to close sync menu
-    useEffect(() => {
-        const handleClickOutside = (event) => {
-            if (syncMenuRef.current && !syncMenuRef.current.contains(event.target)) {
-                setShowSyncSettings(false);
-            }
-        };
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => {
-            document.removeEventListener('mousedown', handleClickOutside);
-        };
-    }, []);
 
     // Edit Mode State
     const [isEditMode, setIsEditMode] = useState(false);
@@ -2956,12 +3009,37 @@ const MondayAppView = () => {
 
             toast.success("Item Updated");
             return true;
+
         } catch (e) {
-            console.error("Single update failed", e);
-            toast.error("Update Failed", e.message || "Could not save changes");
+            console.error(e);
             return false;
         }
     };
+
+    const handleAssetUpdate = (itemId, assetId, assetData) => {
+        const getUpdatedItem = (item) => {
+            if (!item.assets) return item;
+
+            let newAssets = Array.isArray(item.assets) ? [...item.assets] : { ...item.assets };
+
+            if (Array.isArray(newAssets)) {
+                const idx = newAssets.findIndex(a => String(a.id) === String(assetId));
+                if (idx >= 0) {
+                    newAssets[idx] = { ...newAssets[idx], ...assetData };
+                }
+            } else {
+                if (newAssets[assetId]) {
+                    newAssets[assetId] = { ...newAssets[assetId], ...assetData };
+                }
+            }
+
+            return { ...item, assets: newAssets };
+        };
+
+        setBoardItems(prev => prev.map(item => String(item.id) === String(itemId) ? getUpdatedItem(item) : item));
+        setGalleryItem(prev => (prev && String(prev.id) === String(itemId)) ? getUpdatedItem(prev) : prev);
+    };
+
 
     const handleCancelEdit = () => {
         setModifiedItems({});
@@ -3183,6 +3261,8 @@ const MondayAppView = () => {
         if (activeBoardId) localStorage.setItem('monday_activeBoardId', activeBoardId);
     }, [viewMode, showImages, optimizeImages, activeBoardId]);
 
+
+
     useEffect(() => {
         // Init logic
         const init = async () => {
@@ -3247,7 +3327,7 @@ const MondayAppView = () => {
 
     // Sync Handler
     // Sync Handler
-    const handleSync = async () => {
+    const handleSync = async (overrides = {}) => {
         if (!activeBoardId || enterpriseSync.isSyncing) return;
 
         // Use the enterprise sync hook
@@ -3257,7 +3337,8 @@ const MondayAppView = () => {
             forceSyncImages,
             keepOriginals,
             filters: showFilter ? filters : [],
-            itemIds: (showFilter && filters.length > 0) ? filteredItems.map(i => i.id) : null
+            itemIds: (showFilter && filters.length > 0) ? filteredItems.map(i => i.id) : null,
+            ...overrides
         });
 
         if (result) {
@@ -3447,9 +3528,67 @@ const MondayAppView = () => {
                     <div className="mb-6 flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                         <div>
 
-                            <h1 className="text-2xl font-bold text-gray-900">
-                                {boards.find(b => b.id === activeBoardId)?.name || 'Select a Board'}
-                            </h1>
+                            {/* Board Selector (Dropdown or Title) */}
+                            <div className="relative z-50">
+                                {boards.length > 0 ? (
+                                    <div className="relative">
+                                        <button
+                                            onClick={() => setShowBoardSelector(!showBoardSelector)}
+                                            className="flex items-center gap-2 group text-2xl font-bold text-gray-900 hover:text-indigo-600 transition-colors rounded-lg -ml-2 px-2 py-1 hover:bg-gray-50"
+                                        >
+                                            <span className="truncate max-w-md">
+                                                {boards.find(b => b.id === activeBoardId)?.name || 'Select a Board'}
+                                            </span>
+                                            <FiChevronDown className={`w-6 h-6 text-gray-400 group-hover:text-indigo-500 transition-transform ${showBoardSelector ? 'rotate-180' : ''}`} />
+                                        </button>
+
+                                        {showBoardSelector && (
+                                            <>
+                                                <div className="fixed inset-0 z-40" onClick={() => setShowBoardSelector(false)}></div>
+                                                <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-gray-100 z-50 animate-fadeIn overflow-hidden flex flex-col">
+                                                    <div className="px-4 py-3 bg-gray-50 border-b border-gray-100">
+                                                        <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Switch Board</span>
+                                                    </div>
+                                                    <div className="max-h-80 overflow-y-auto p-1 text-sm">
+                                                        {boards.map(b => (
+                                                            <button
+                                                                key={b.id}
+                                                                onClick={() => {
+                                                                    setActiveBoardId(b.id);
+                                                                    setShowBoardSelector(false);
+                                                                    setCursor(null);
+                                                                }}
+                                                                className={`w-full text-left flex items-center justify-between px-3 py-2.5 rounded-lg transition-colors ${activeBoardId === b.id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700 hover:bg-gray-50'}`}
+                                                            >
+                                                                <span className="font-medium truncate">{b.name}</span>
+                                                                {activeBoardId === b.id && <FiCheck className="text-indigo-600 w-4 h-4" />}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                    <div className="p-2 border-t border-gray-100 bg-gray-50">
+                                                        <button
+                                                            onClick={() => navigate(`/apps/configure/${installedAppId}`)}
+                                                            className="w-full flex items-center justify-center gap-2 py-2 text-xs font-bold text-indigo-600 hover:bg-indigo-100 rounded-lg transition-colors"
+                                                        >
+                                                            <FiSettings className="w-3 h-3" /> Configure Boards
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-3">
+                                        <h1 className="text-2xl font-bold text-gray-400 italic">No Boards Configured</h1>
+                                        <button
+                                            onClick={() => navigate(`/apps/configure/${installedAppId}`)}
+                                            className="text-sm font-medium text-indigo-600 hover:text-indigo-800 underline"
+                                        >
+                                            Connect a Board
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
                             {(() => {
                                 const board = boards.find(b => b.id === activeBoardId);
                                 if (!board || !board.last_synced_at) return null;
@@ -3537,7 +3676,7 @@ const MondayAppView = () => {
                                                         onClick={() => { setSortConfig({ ...sortConfig, key: c.id }); setShowSortMenu(false); }}
                                                         className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors flex justify-between items-center ${sortConfig.key === c.id ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-700 hover:bg-gray-50'}`}
                                                     >
-                                                        <span className="truncate">{c.id}</span>
+                                                        <span className="truncate">{columnsMap?.[c.id]?.title || c.id}</span>
                                                         {sortConfig.key === c.id && <span className="text-xs bg-indigo-200 text-indigo-800 px-1.5 rounded">Active</span>}
                                                     </button>
                                                 ))}
@@ -3620,39 +3759,148 @@ const MondayAppView = () => {
                             </div>
 
                             {/* Sync Options Popover / Dropdown */}
-                            {/* Sync Options Popover / Dropdown */}
-                            <div className="relative mr-2" ref={syncMenuRef}>
-                                <div className="inline-flex shadow-sm rounded-md isolate">
+                            {/* Sync Dropdown (Split Button) */}
+                            {/* Sync Dropdown (Split Button) */}
+                            <div className="relative mr-2 flex rounded-lg shadow-sm h-10 items-stretch">
+                                <button
+                                    onClick={handleSync}
+                                    disabled={enterpriseSync.isSyncing}
+                                    className={`relative inline-flex items-center px-4 rounded-l-lg border border-r-0 border-indigo-600 bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed`}
+                                >
+                                    {enterpriseSync.isSyncing ? <FiLoader className="animate-spin -ml-1 mr-2 h-4 w-4" /> : <FiRefreshCw className="-ml-1 mr-2 h-4 w-4" />}
+                                    {enterpriseSync.isSyncing ? 'Syncing...' : 'Sync Now'}
+                                </button>
+                                <div className="relative block h-full">
                                     <button
-                                        onClick={handleSync}
+                                        onClick={() => setShowSyncMenu(!showSyncMenu)}
                                         disabled={enterpriseSync.isSyncing}
-                                        className={`relative inline-flex items-center px-4 py-2 rounded-l-md border border-indigo-600 bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 focus:z-10 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed`}
+                                        className="relative inline-flex items-center justify-center px-2 rounded-r-lg border border-l border-indigo-700 bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50 h-full"
+                                        aria-label="Sync Options"
                                     >
-                                        {enterpriseSync.isSyncing ? <FiLoader className="animate-spin -ml-1 mr-2 h-4 w-4" /> : <FiRefreshCw className="-ml-1 mr-2 h-4 w-4" />}
-                                        {enterpriseSync.isSyncing ? 'Syncing...' : 'Sync'}
+                                        <FiChevronDown className="h-4 w-4" aria-hidden="true" />
                                     </button>
-                                    <button
-                                        onClick={() => setShowSyncSettings(!showSyncSettings)}
-                                        disabled={enterpriseSync.isSyncing}
-                                        className={`relative -ml-px inline-flex items-center px-2 py-2 rounded-r-md border border-l-indigo-700 border-indigo-600 bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 focus:z-10 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${showSyncSettings ? 'bg-indigo-800' : ''}`}
-                                    >
-                                        <FiChevronDown className="h-4 w-4" />
-                                    </button>
-                                </div>
+                                    {showSyncMenu && (
+                                        <>
+                                            <div className="fixed inset-0 z-30" onClick={() => setShowSyncMenu(false)}></div>
+                                            <div className="origin-top-right absolute right-0 mt-2 w-72 rounded-xl shadow-xl bg-white ring-1 ring-black ring-opacity-5 z-40 animate-in fade-in zoom-in-95 duration-200 divide-y divide-gray-100 overflow-hidden">
+                                                <div className="px-4 py-3 bg-gray-50/80 backdrop-blur-sm">
+                                                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Sync Settings</p>
+                                                </div>
+                                                <div className="py-2 px-1" role="none">
+                                                    {/* Download Images Toggle */}
+                                                    <div className="flex items-center justify-between group cursor-pointer px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors mx-1" onClick={() => setShowImages(!showImages)}>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-sm font-medium text-gray-700 group-hover:text-indigo-600 transition-colors">Download Images</span>
+                                                            <span className="text-[10px] text-gray-400">Sync board assets</span>
+                                                        </div>
+                                                        <button
+                                                            className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 ${showImages ? 'bg-indigo-600' : 'bg-gray-200'}`}
+                                                            role="switch"
+                                                            aria-checked={showImages}
+                                                        >
+                                                            <span aria-hidden="true" className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${showImages ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        </button>
+                                                    </div>
 
-                                {showSyncSettings && (
-                                    <SyncMenu
-                                        optimizeImages={optimizeImages}
-                                        setOptimizeImages={setOptimizeImages}
-                                        keepOriginals={keepOriginals}
-                                        setKeepOriginals={setKeepOriginals}
-                                        forceSyncImages={forceSyncImages}
-                                        setForceSyncImages={setForceSyncImages}
-                                        onClearCache={() => setShowClearCache(true)}
-                                        onClose={() => setShowSyncSettings(false)}
-                                    />
-                                )}
+                                                    {/* Optimize Images Toggle */}
+                                                    <div className="flex items-center justify-between group cursor-pointer px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors mx-1" onClick={() => setOptimizeImages(!optimizeImages)}>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-sm font-medium text-gray-700 group-hover:text-indigo-600 transition-colors">Optimize</span>
+                                                            <span className="text-[10px] text-gray-400">Compress for mobile</span>
+                                                        </div>
+                                                        <button
+                                                            className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 ${optimizeImages ? 'bg-indigo-600' : 'bg-gray-200'}`}
+                                                            role="switch"
+                                                            aria-checked={optimizeImages}
+                                                        >
+                                                            <span aria-hidden="true" className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${optimizeImages ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        </button>
+                                                    </div>
+
+                                                    {/* Keep Originals Toggle */}
+                                                    <div className="flex items-center justify-between group cursor-pointer px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors mx-1" onClick={() => setKeepOriginals(!keepOriginals)}>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-sm font-medium text-gray-700 group-hover:text-indigo-600 transition-colors">Keep Originals</span>
+                                                            <span className="text-[10px] text-gray-400">Save full resolution</span>
+                                                        </div>
+                                                        <button
+                                                            className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 ${keepOriginals ? 'bg-indigo-600' : 'bg-gray-200'}`}
+                                                            role="switch"
+                                                            aria-checked={keepOriginals}
+                                                        >
+                                                            <span aria-hidden="true" className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${keepOriginals ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                <div>
+                                                    <div className="px-4 py-2 bg-gray-50/50">
+                                                        <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Actions</p>
+                                                    </div>
+
+                                                    <div className="py-1" role="menu" aria-orientation="vertical">
+                                                        <button
+                                                            onClick={() => {
+                                                                setForceSyncImages(true);
+                                                                handleSync({ forceSyncImages: true });
+                                                                setShowSyncMenu(false);
+                                                            }}
+                                                            className="group w-full text-left block px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 hover:text-gray-900"
+                                                            role="menuitem"
+                                                        >
+                                                            <div className="flex items-center">
+                                                                <FiDownloadCloud className="mr-3 h-5 w-5 text-gray-400 group-hover:text-indigo-500" />
+                                                                <div>
+                                                                    <span className="font-semibold block">Force Sync Images</span>
+                                                                    <span className="text-xs text-gray-500 font-normal">Re-download all assets</span>
+                                                                </div>
+                                                            </div>
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                setForceSyncImages(true);
+                                                                setOptimizeImages(true);
+                                                                handleSync({ forceSyncImages: false, optimizeImages: true }); // Use offline files
+                                                                setShowSyncMenu(false);
+                                                            }}
+                                                            className="group w-full text-left block px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 hover:text-gray-900"
+                                                            role="menuitem"
+                                                        >
+                                                            <div className="flex items-center">
+                                                                <FiZap className="mr-3 h-5 w-5 text-yellow-400 group-hover:text-yellow-500" />
+                                                                <div>
+                                                                    <span className="font-semibold block">Batch Optimize Images</span>
+                                                                    <span className="text-xs text-gray-500 font-normal">Generate WebP for all items</span>
+                                                                </div>
+                                                            </div>
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                setShowClearCache(true);
+                                                                setShowSyncMenu(false);
+                                                            }}
+                                                            className="group w-full text-left block px-4 py-3 text-sm text-red-700 hover:bg-red-50"
+                                                            role="menuitem"
+                                                        >
+                                                            <div className="flex items-center">
+                                                                <FiTrash2 className="mr-3 h-5 w-5 text-red-400 group-hover:text-red-500" />
+                                                                <div>
+                                                                    <span className="font-semibold block">Clear Local Cache</span>
+                                                                    <span className="text-xs text-red-400 font-normal">Free up storage space</span>
+                                                                </div>
+                                                            </div>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                        </>
+                                    )}
+                                </div>
                             </div>
+
+                            {/* Settings Button (New) */}
+
 
                             <button
                                 onClick={() => navigate('/apps')}
@@ -4042,6 +4290,7 @@ const MondayAppView = () => {
                         optimizeImages={optimizeImages}
                         columnsMap={columnsMap}
                         onItemUpdate={handleSingleItemUpdate}
+                        onAssetUpdate={handleAssetUpdate}
                         editableColumns={editableColumns}
                         onNext={handleNextItem}
                         onPrev={handlePrevItem}
@@ -4049,6 +4298,8 @@ const MondayAppView = () => {
                         hasPrev={filteredItemsList.length > 1}
                         refreshKey={refreshKey}
                         onRotationComplete={() => setRefreshKey(prev => prev + 1)}
+                        enterpriseSync={enterpriseSync}
+                        keepOriginals={keepOriginals}
                     />
                 )
             }
@@ -4119,11 +4370,14 @@ const MondayAppView = () => {
             }
 
             {/* Job History Panel */}
-            {
-                showJobHistory && (
-                    <JobHistoryPanel onClose={() => setShowJobHistory(false)} />
-                )
-            }
+            {/* Configuration Modal */}
+
+
+            {/* Modals */}
+            <JobHistoryPanel
+                isOpen={showJobHistory}
+                onClose={() => setShowJobHistory(false)}
+            />
         </div >
     );
 };

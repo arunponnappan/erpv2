@@ -2,10 +2,12 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, TextInput, Dimensions } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { Search, LogOut, CheckCircle, RefreshCw, Filter, Database } from 'lucide-react-native';
+import * as SecureStore from 'expo-secure-store';
+import { Search, LogOut, CheckCircle, RefreshCw, Filter, Database, CloudOff, CloudUpload, PieChart as ChartPie } from 'lucide-react-native';
 import api from '../services/api';
-import { initDB, saveItems, getItems, updateItemLocal } from '../services/db';
+import { initDB, saveItems, getItems, updateItemLocal, getUnsyncedItems, markAsSynced } from '../services/db';
 import FilterModal from '../components/FilterModal';
+import SummaryModal from '../components/SummaryModal';
 
 const MainScannerScreen = ({ onLogout }) => {
     // Camera State
@@ -24,6 +26,7 @@ const MainScannerScreen = ({ onLogout }) => {
 
     // Filter State
     const [filterModalVisible, setFilterModalVisible] = useState(false);
+    const [summaryModalVisible, setSummaryModalVisible] = useState(false); // Summary Modal
     const [activeFilterConfig, setActiveFilterConfig] = useState({
         sortField: 'name',
         sortDirection: 'asc',
@@ -56,10 +59,25 @@ const MainScannerScreen = ({ onLogout }) => {
         console.log("Loading MainScannerScreen Data...");
         try {
             // 1. Fetch Config
-            const configRes = await api.get('/integrations/monday/config/barcode');
+            let activeConfig = null;
+            try {
+                const configRes = await api.get('/integrations/monday/config/barcode');
+                if (configRes.data && configRes.data.length > 0) {
+                    activeConfig = configRes.data[0];
+                    // Cache Config for Offline
+                    await SecureStore.setItemAsync('monday_barcode_config', JSON.stringify(activeConfig));
+                }
+            } catch (configErr) {
+                console.warn("Config Fetch Failed, trying cache...", configErr);
+                // Try Load from Cache
+                const cached = await SecureStore.getItemAsync('monday_barcode_config');
+                if (cached) {
+                    activeConfig = JSON.parse(cached);
+                    console.log("Loaded Config from Cache");
+                }
+            }
 
-            if (configRes.data && configRes.data.length > 0) {
-                const activeConfig = configRes.data[0];
+            if (activeConfig) {
                 setConfig(activeConfig);
 
                 // Set Default Sorting from Config
@@ -77,9 +95,55 @@ const MainScannerScreen = ({ onLogout }) => {
                     generateColumnsList(activeConfig, localData);
                 }
 
-                // 3. Fetch from Server (Sync)
+                // 3. Sync Logic (Push Dirty -> Pull New)
+                // A. PUSH: Check for local dirty items and push them
+                const dirtyItems = getUnsyncedItems(activeConfig.board_id);
+                if (dirtyItems.length > 0) {
+                    console.log(`Found ${dirtyItems.length} unsynced items. Pushing...`);
+                    for (const dirtyItem of dirtyItems) {
+                        try {
+                            const barcodeColId = activeConfig.barcode_column_id;
+                            // Extract barcode value
+                            // We need to find the value to send.
+                            let colValuesMap = {};
+                            if (Array.isArray(dirtyItem.column_values)) dirtyItem.column_values.forEach(cv => colValuesMap[cv.id] = cv.text || cv.value);
+                            const barcodeVal = colValuesMap[barcodeColId];
+                            const codeToSend = (barcodeVal && typeof barcodeVal === 'object') ? barcodeVal.text || barcodeVal.value : barcodeVal;
+
+                            if (codeToSend) {
+                                await api.post(`/integrations/monday/items/${dirtyItem.id}/barcode`, {
+                                    barcode: codeToSend
+                                });
+                                markAsSynced(dirtyItem.id);
+                                console.log(`Synced dirty item ${dirtyItem.id}`);
+                            }
+                        } catch (pushErr) {
+                            console.error(`Failed to push item ${dirtyItem.id}`, pushErr);
+                            // Verify 401? If so stop.
+                        }
+                    }
+                    // Refresh local data after marking synced
+                    const updatedLocal = getItems(activeConfig.board_id);
+                    setItems(updatedLocal);
+                }
+
+
+                // B. PULL: Fetch from Server
                 console.log(`Fetching items from Server for board ${activeConfig.board_id}...`);
-                const itemsRes = await api.get(`/integrations/monday/boards/${activeConfig.board_id}/items?limit=1000`); // Increased limit
+                const itemsRes = await api.get(`/integrations/monday/boards/${activeConfig.board_id}/items?limit=1000`);
+
+                // Fetch Board Metadata for correct column titles
+                let boardColumns = [];
+                try {
+                    // We try to find the board in the list
+                    const boardsRes = await api.get(`/integrations/monday/boards`);
+                    const currentBoard = boardsRes.data.find(b => String(b.id) === String(activeConfig.board_id));
+                    if (currentBoard && currentBoard.columns) {
+                        boardColumns = currentBoard.columns;
+                    }
+                } catch (e) {
+                    console.warn("Could not fetch board metadata for titles", e);
+                }
 
                 let serverItems = [];
                 if (itemsRes.data && Array.isArray(itemsRes.data.items)) {
@@ -93,7 +157,7 @@ const MainScannerScreen = ({ onLogout }) => {
                     setItems(serverItems);
                     // Save to Local DB
                     saveItems(serverItems, activeConfig.board_id);
-                    generateColumnsList(activeConfig, serverItems);
+                    generateColumnsList(activeConfig, serverItems, boardColumns);
                 } else if (localData.length === 0) {
                     Alert.alert("No Items", "Connected to board, but no items were found.");
                 }
@@ -118,7 +182,7 @@ const MainScannerScreen = ({ onLogout }) => {
     };
 
     // Helper: Generate list of columns for Sorting
-    const generateColumnsList = (cfg, itemList) => {
+    const generateColumnsList = (cfg, itemList, boardDefinedColumns = []) => {
         if (!cfg || !itemList || itemList.length === 0) return;
 
         // We use the first item to find column IDs
@@ -134,11 +198,14 @@ const MainScannerScreen = ({ onLogout }) => {
             }
         }
 
-        // Pretty titles? (Hard without board metadata, just capitalize)
-        cols = cols.map(c => ({
-            ...c,
-            title: c.title.charAt(0).toUpperCase() + c.title.slice(1).replace(/_/g, ' ')
-        }));
+        // Pretty titles? Map using board metadata if available
+        cols = cols.map(c => {
+            const found = boardDefinedColumns.find(bc => bc.id === c.id);
+            return {
+                ...c,
+                title: found ? found.title : (c.title.charAt(0).toUpperCase() + c.title.slice(1).replace(/_/g, ' '))
+            };
+        });
 
         setAvailableColumns(cols);
     };
@@ -240,20 +307,20 @@ const MainScannerScreen = ({ onLogout }) => {
             setSelectedItem(null);
         } catch (error) {
             console.error(error);
-            // Revert State? Or Keep Local?
-            // If offline, this fails. We should queue it.
-            // For now, simpler to Alert failure but KEEP local state so user sees it?
-            // Or Revert. User asked for "reliable". Reliable usually means "queue".
-            // Since queue is not built, Revert + Alert is safest to avoid desync.
+            // OFFLINE HANDLING:
+            // Do NOT revert state. The item is already saved locally as is_synced=0.
+            // Just inform the user.
 
-            // However, to be "reliable", maybe we don't revert?
-            // Let's Revert for now to avoid lying to user about "Success"
-            setItems(previousItems);
-            // Revert DB?
-            saveItems([selectedItem], config.board_id); // Restore old item to DB
-
-            Alert.alert("Sync Failed", "Could not update server. Check connection.");
+            Alert.alert("Saved Offline", "Connection failed. Changes saved locally and will sync later.");
             setScanned(false);
+            setSelectedItem(null);
+
+            // Refresh items from DB to ensure UI reflects dirty state (if we add indicators)
+            // Actually, we just updated state in memory, so UI is fine.
+            // But if we want to show "Dirty Icon", we need to make sure the item object has `_is_synced: 0` if we rely on that.
+            // Our optimistic update didn't add `_is_synced`.
+            setItems(prev => prev.map(i => i.id === selectedItem.id ? { ...i, _is_synced: 0 } : i));
+
         } finally {
             setProcessing(false);
         }
@@ -361,7 +428,18 @@ const MainScannerScreen = ({ onLogout }) => {
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
                         {isSelected ? <CheckCircle color="#2563eb" size={24} /> :
-                            (barcodeVal ? <View style={styles.barcodeBadge}><Text style={styles.barcodeText}>{barcodeVal}</Text></View> : <Text style={{ color: '#ddd' }}>--</Text>)}
+                            (barcodeVal ?
+                                <View style={{ alignItems: 'flex-end' }}>
+                                    <View style={styles.barcodeBadge}><Text style={styles.barcodeText}>{barcodeVal}</Text></View>
+                                    {/* Sync Indicator */}
+                                    {item._is_synced === 0 && (
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                            <CloudOff size={12} color="#f59e0b" />
+                                            <Text style={{ fontSize: 10, color: '#f59e0b', marginLeft: 2 }}>Unsynced</Text>
+                                        </View>
+                                    )}
+                                </View>
+                                : <Text style={{ color: '#ddd' }}>--</Text>)}
                     </View>
                 </View>
             </TouchableOpacity>
@@ -408,6 +486,12 @@ const MainScannerScreen = ({ onLogout }) => {
                             <Filter size={20} color={activeFilterConfig.filterStatus !== 'all' ? "#2563eb" : "#6b7280"} />
                         </TouchableOpacity>
                     </View>
+
+                    {/* Summary Button */}
+                    <TouchableOpacity onPress={() => setSummaryModalVisible(true)} style={styles.iconBtn}>
+                        <ChartPie size={24} color="#2563eb" />
+                    </TouchableOpacity>
+
                     <TouchableOpacity onPress={() => loadData(true)} style={styles.iconBtn}>
                         {refreshing ? <ActivityIndicator size={24} color="#2563eb" /> : <RefreshCw size={24} color="#2563eb" />}
                     </TouchableOpacity>
@@ -428,7 +512,24 @@ const MainScannerScreen = ({ onLogout }) => {
                 onClose={() => setFilterModalVisible(false)}
                 onApply={setActiveFilterConfig}
                 currentConfig={activeFilterConfig}
+                currentConfig={activeFilterConfig}
                 columns={availableColumns} // PASS DYNAMIC COLUMNS
+            />
+
+            <SummaryModal
+                visible={summaryModalVisible}
+                onClose={() => setSummaryModalVisible(false)}
+                totalItems={items.length}
+                scannedItems={items.filter(i => {
+                    if (!config?.barcode_column_id) return false;
+                    const barcodeColId = config.barcode_column_id;
+                    let colValuesMap = {};
+                    if (Array.isArray(i.column_values)) i.column_values.forEach(cv => colValuesMap[cv.id] = cv.text || cv.value);
+                    else if (i.column_values) colValuesMap = i.column_values;
+                    const val = colValuesMap[barcodeColId];
+                    const valStr = (val && typeof val === 'object' ? val.text || val.value : val) || '';
+                    return valStr && String(valStr).trim().length > 0;
+                }).length}
             />
 
             {processing && <View style={styles.loadingOverlay}><ActivityIndicator size="large" color="#fff" /></View>}

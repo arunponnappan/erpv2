@@ -31,6 +31,43 @@ class MondayService:
             "API-Version": "2024-04"
         }
 
+    def delete_board(self, session: Session, board_id: int) -> bool:
+        """
+        Deletes a board, its items, and all downloaded assets.
+        """
+        import shutil
+        
+        # 1. Delete Items (and rely on DB cascade if set, but explicit is safer for now)
+        # Actually SQLModel might not cascade by default without config.
+        # Let's delete items first to be safe.
+        statement = delete(MondayItem).where(MondayItem.board_id == board_id)
+        session.exec(statement)
+        
+        # 2. Delete Board Access records
+        session.exec(delete(MondayBoardAccess).where(MondayBoardAccess.board_id == board_id))
+
+        # 3. Delete Board
+        board = session.get(MondayBoard, board_id)
+        if board:
+            session.delete(board)
+        
+        try:
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+            
+        # 4. Delete Files
+        board_dir = Path(self.ASSETS_DIR) / str(board_id)
+        if board_dir.exists() and board_dir.is_dir():
+            try:
+                shutil.rmtree(board_dir)
+            except Exception as e:
+                print(f"Error deleting board files {board_dir}: {e}")
+                # We don't fail the request if file deletion fails, but we log it
+                
+        return True
+
     async def execute_query(self, query: str, variables: Dict[str, Any] = None) -> Dict[str, Any]:
         async with httpx.AsyncClient() as client:
             payload = {"query": query}
@@ -278,7 +315,8 @@ class MondayService:
         
         # FIX: Handle Duplicate Filenames
         # Prepend asset_id to ensure uniqueness even if multiple files have same name 'image.jpg'
-        safe_original_name = "".join([c for c in original_name if c.isalnum() or c in ('-', '_', '.', ' ')])
+        # Unicode-safe sanitization: allow letters/numbers from any language, plus basic safe chars
+        safe_original_name = "".join([c for c in original_name if c.isalnum() or c in ('-', '_', '.', ' ', '(', ')', '[', ']')]).strip()
         safe_name = f"{asset_id}_{safe_original_name}"
         
         local_file_path = base_dir / safe_name

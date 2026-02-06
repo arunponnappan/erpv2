@@ -16,6 +16,19 @@ try:
 except ImportError:
     custom_routes = None
 
+print("DEBUG: monday.py module loaded/reloaded")
+
+class BarcodeConfigRequest(BaseModel):
+    board_id: int
+    is_mobile_active: bool = True
+    barcode_column_id: str
+    search_column_id: Optional[str] = None
+    sort_column_id: Optional[str] = 'name'
+    sort_direction: Optional[str] = 'asc'
+    display_column_ids: Optional[List[str]] = []
+
+
+
 router = APIRouter()
 if custom_routes:
     router.include_router(custom_routes.router)
@@ -409,3 +422,73 @@ async def clear_board_cache(
     )
     
     return result
+
+# --- BARCODE CONFIGURATION ENDPOINTS ---
+
+
+
+@router.get("/config/barcode")
+async def get_barcode_config(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    """
+    Get the global barcode configuration.
+    """
+    from fastapi.responses import JSONResponse
+    try:
+        if not current_user.company_id:
+            return JSONResponse(content={})
+
+        app = session.exec(select(InstalledApp).where(InstalledApp.company_id == current_user.company_id).where(InstalledApp.app_id == 1)).first()
+        if not app:
+              return JSONResponse(content={})
+        
+        # Safe settings access
+        current_settings = app.settings
+        if current_settings is None:
+            current_settings = {}
+        elif isinstance(current_settings, str):
+            # Fallback if somehow it's a string (though SQLModel handles this)
+            import json
+            try:
+                current_settings = json.loads(current_settings)
+            except:
+                current_settings = {}
+        
+        if not isinstance(current_settings, dict):
+            current_settings = {}
+
+        config = current_settings.get("barcode_config", {})
+        return config
+    except Exception as e:
+        print(f"Error fetching barcode config: {e}")
+        # Return empty dict on error to prevent 500
+        return JSONResponse(content={})
+
+@router.post("/config/barcode")
+async def save_barcode_config(
+    payload: BarcodeConfigRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    """
+    Save the global barcode configuration.
+    """
+    try:
+        app = session.exec(select(InstalledApp).where(InstalledApp.company_id == current_user.company_id).where(InstalledApp.app_id == 1)).first()
+        if not app:
+            raise HTTPException(status_code=400, detail="App not installed")
+            
+        # Update settings safely
+        current_settings = app.settings.copy() if app.settings else {}
+        current_settings["barcode_config"] = payload.dict()
+        app.settings = current_settings
+        
+        session.add(app)
+        session.commit()
+        
+        return {"status": "success", "config": payload.dict()}
+    except Exception as e:
+         print(f"Error saving barcode config: {e}")
+         raise HTTPException(status_code=500, detail=f"Failed to save config: {str(e)}")
