@@ -352,7 +352,8 @@ async def proxy_monday_asset(
                 return StreamingResponse(
                     output_io, 
                     status_code=200, 
-                    media_type="image/webp"
+                    media_type="image/webp",
+                    headers={"Access-Control-Allow-Origin": "*"}
                 )
             except Exception as img_err:
                 print(f"Image Optimization Failed: {img_err}")
@@ -364,7 +365,8 @@ async def proxy_monday_asset(
                 return StreamingResponse(
                     BytesIO(content),
                     status_code=200,
-                    media_type=r.headers.get("content-type")
+                    media_type=r.headers.get("content-type"),
+                    headers={"Access-Control-Allow-Origin": "*"}
                 )
 
         # STANDARD PATH: Stream directly
@@ -382,7 +384,8 @@ async def proxy_monday_asset(
         # Do NOT forward content-encoding or content-length to avoid browser confusion
         # (Since we are streaming decoded bytes, length and encoding change)
         response_headers = {
-            "Content-Disposition": r.headers.get("content-disposition", "inline")
+            "Content-Disposition": r.headers.get("content-disposition", "inline"),
+            "Access-Control-Allow-Origin": "*"
         }
         
         return StreamingResponse(
@@ -422,6 +425,25 @@ async def clear_board_cache(
     )
     
     return result
+
+
+@router.get("/boards/{board_id}/columns")
+async def get_board_columns(
+    board_id: int,
+    session: Session = Depends(get_session),
+    service: MondayService = Depends(get_monday_service)
+) -> Any:
+    """
+    Get column configuration for a board.
+    Returns columns with their IDs, titles, types, and editable status.
+    """
+    try:
+        columns = await service.get_board_columns(session, board_id)
+        return {"columns": columns}
+    except Exception as e:
+        print(f"Error fetching board columns: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- BARCODE CONFIGURATION ENDPOINTS ---
 
@@ -492,3 +514,4 @@ async def save_barcode_config(
     except Exception as e:
          print(f"Error saving barcode config: {e}")
          raise HTTPException(status_code=500, detail=f"Failed to save config: {str(e)}")
+

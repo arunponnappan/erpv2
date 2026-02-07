@@ -5,17 +5,20 @@ import api from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useLayout } from '../../context/LayoutContext';
 import { useDebug } from '../../context/DebugContext';
-import { FiMenu, FiChevronRight, FiChevronLeft, FiChevronDown, FiChevronUp, FiAlertCircle, FiLoader, FiX, FiDownload, FiExternalLink, FiGrid, FiList, FiLogOut, FiFilter, FiSearch, FiImage, FiPlus, FiTrash2, FiZap, FiRefreshCw, FiArrowUp, FiArrowDown, FiEdit2, FiCheck, FiSettings, FiCpu, FiDownloadCloud, FiRotateCw, FiRotateCcw, FiCrop, FiCopy, FiZoomIn, FiZoomOut, FiLock, FiSidebar, FiClock } from 'react-icons/fi';
+import { FiMenu, FiChevronRight, FiChevronLeft, FiChevronDown, FiChevronUp, FiAlertCircle, FiLoader, FiX, FiDownload, FiExternalLink, FiGrid, FiList, FiLogOut, FiFilter, FiSearch, FiImage, FiPlus, FiTrash2, FiZap, FiRefreshCw, FiArrowUp, FiArrowDown, FiEdit2, FiCheck, FiSettings, FiCpu, FiDownloadCloud, FiRotateCw, FiRotateCcw, FiCrop, FiCopy, FiZoomIn, FiZoomOut, FiLock, FiSidebar, FiClock, FiMaximize2, FiMinimize2, FiLayout, FiBriefcase, FiMapPin, FiBox, FiActivity, FiArrowRight, FiTarget, FiFileText, FiMove, FiType, FiDatabase, FiXCircle } from 'react-icons/fi';
+import { Html5Qrcode } from 'html5-qrcode';
+import Tesseract from 'tesseract.js';
 import JobHistoryPanel from '../../features/monday/components/sync/JobHistoryPanel';
 
 import { useMondaySync } from '../../features/monday/hooks/useMondaySync';
 import { getProxyUrl } from '../../features/monday/utils/imageHelpers';
 import syncService from '../../features/monday/services/syncService';
 
+
 // --- SHARED HELPERS & COMPONENTS ---
 
 // Component to fetch image to local blob with progress
-const CachedImage = ({ file, proxyUrl, originalUrl, usePublic, className, compact = false, shouldLoad = true, isLocal = false, style = {}, imgRef, optimizeImages = false }) => {
+const CachedImage = ({ file, proxyUrl, originalUrl, usePublic, className, compact = false, shouldLoad = true, isLocal = false, style = {}, imgRef, optimizeImages = false, crossOrigin = undefined }) => {
     // Ensure we have a ref to check 'complete' status, even if parent didn't pass one
     const localRef = useRef(null);
     const resolvedRef = imgRef || localRef;
@@ -157,7 +160,7 @@ const CachedImage = ({ file, proxyUrl, originalUrl, usePublic, className, compac
 
     const imgSrcBase = (optimizeImages && file?.optimized_path)
         ? getAbsoluteUrl(file.optimized_path)
-        : (effectiveIsLocal ? getAbsoluteUrl(proxyUrl) : (blobUrl || originalUrl));
+        : (effectiveIsLocal ? getAbsoluteUrl(proxyUrl) : (blobUrl || (crossOrigin ? getAbsoluteUrl(proxyUrl) : originalUrl)));
 
     const imgSrc = (imgSrcBase && file?._ts) ? `${imgSrcBase}${imgSrcBase.includes('?') ? '&' : '?'}t=${file._ts}` : imgSrcBase;
 
@@ -200,6 +203,7 @@ const CachedImage = ({ file, proxyUrl, originalUrl, usePublic, className, compac
                     key={imgSrc} // Force fresh image element per source to prevent buffer ghosting
                     ref={resolvedRef}
                     src={imgSrc}
+                    crossOrigin={crossOrigin}
                     alt={file?.name || 'Image'}
                     className={`${className} transition-opacity duration-300 ${isImageReady ? 'opacity-100' : 'opacity-0'}`}
                     style={style}
@@ -597,6 +601,7 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
                             let localUrl = null;
                             let originalUrl = f.url || f.public_url;
                             let usePublic = false;
+                            let localOriginalUrl = null;
 
                             if (f.assetId && itm.assets) {
                                 const foundAsset = itm.assets.find(a => a.id === String(f.assetId) || a.id === parseInt(f.assetId));
@@ -605,6 +610,8 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
 
                                     // NEW: Use helper to get strictly local URL
                                     localUrl = getProxyUrl(foundAsset, optimizeImages);
+                                    // Get explicit original (unoptimized) for "Open Original" button
+                                    localOriginalUrl = getProxyUrl(foundAsset, false);
 
                                     // Fallback to original ONLY if we want to allow public links (BUT requirement is local-only)
                                     // So we store originalUrl just for reference or "Download Original" but NOT for display
@@ -618,6 +625,7 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
                                 columnId: col.id,
                                 itemName: itm.name,
                                 proxyUrl: localUrl, // Only populated if local
+                                localOriginalUrl,   // Explicit local original
                                 originalUrl,        // Monday URL
                                 isLocal: !!localUrl
                             });
@@ -699,117 +707,131 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
             </div>
             <div className="relative flex-1 overflow-y-auto p-6">
                 {/* Gallery */}
-                {allFiles.length > 0 && (
-                    <div className="mb-8">
-                        <h3 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Attachments ({allFiles.length})</h3>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                            {allFiles.map((file, idx) => {
-                                const { isLocal, proxyUrl, originalUrl, name } = file;
-                                const isImage = /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(name || '');
-                                const progress = proxyUrl && downloading[proxyUrl];
+                {
+                    allFiles.length > 0 && (
+                        <div className="mb-8">
+                            <h3 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Attachments ({allFiles.length})</h3>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                                {allFiles.map((file, idx) => {
+                                    const { isLocal, proxyUrl, originalUrl, name } = file;
+                                    const isImage = /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(name || '');
+                                    const progress = proxyUrl && downloading[proxyUrl];
 
-                                return (
-                                    <div key={idx} className="group relative border rounded-xl overflow-hidden bg-gray-50 hover:shadow-md transition-shadow">
-                                        {/* Image Display */}
-                                        <div className="aspect-square bg-gray-200 relative overflow-hidden">
-                                            {isImage ? (
-                                                isLocal && proxyUrl ? (
-                                                    <img
-                                                        src={proxyUrl ? `${proxyUrl}${proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : proxyUrl}
-                                                        alt={name}
-                                                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                                                        onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
-                                                    />
+                                    return (
+                                        <div key={idx} className="group relative border rounded-xl overflow-hidden bg-gray-50 hover:shadow-md transition-shadow">
+                                            {/* Image Display */}
+                                            <div className="aspect-square bg-gray-200 relative overflow-hidden">
+                                                {isImage ? (
+                                                    isLocal && proxyUrl ? (
+                                                        <img
+                                                            src={proxyUrl ? `${proxyUrl}${proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : proxyUrl}
+                                                            alt={name}
+                                                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                                                            onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                                                        />
+                                                    ) : (
+                                                        // Placeholder for missing/remote image
+                                                        <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 p-2 text-center">
+                                                            <FiImage className="w-8 h-8 opacity-40 mb-1" />
+                                                            <span className="text-[10px] uppercase font-bold tracking-wider opacity-60">Not Synced</span>
+                                                        </div>
+                                                    )
                                                 ) : (
-                                                    // Placeholder for missing/remote image
-                                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 p-2 text-center">
-                                                        <FiImage className="w-8 h-8 opacity-40 mb-1" />
-                                                        <span className="text-[10px] uppercase font-bold tracking-wider opacity-60">Not Synced</span>
+                                                    // Generic File Placeholder
+                                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-400">
+                                                        <FiDownloadCloud className="w-8 h-8 opacity-40" />
                                                     </div>
-                                                )
-                                            ) : (
-                                                // Generic File Placeholder
-                                                <div className="w-full h-full flex flex-col items-center justify-center text-gray-400">
-                                                    <FiDownloadCloud className="w-8 h-8 opacity-40" />
+                                                )}
+
+                                                {/* Local Image Fallback Hidden Div */}
+                                                <div className="hidden w-full h-full flex-col items-center justify-center text-red-400 absolute inset-0 bg-gray-100">
+                                                    <FiAlertCircle className="w-6 h-6 mb-1" />
+                                                    <span className="text-[10px]">Load Error</span>
                                                 </div>
-                                            )}
-
-                                            {/* Local Image Fallback Hidden Div */}
-                                            <div className="hidden w-full h-full flex-col items-center justify-center text-red-400 absolute inset-0 bg-gray-100">
-                                                <FiAlertCircle className="w-6 h-6 mb-1" />
-                                                <span className="text-[10px]">Load Error</span>
                                             </div>
-                                        </div>
 
-                                        {/* Overlay Actions */}
-                                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2">
-                                            <div className="flex gap-2 justify-center mb-auto pt-8">
-                                                {/* View Action (Only if local) */}
-                                                {isLocal && proxyUrl && (
+                                            {/* Overlay Actions */}
+                                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2">
+                                                <div className="flex gap-2 justify-center mb-auto pt-8">
+                                                    {/* View Action (Only if local) */}
+                                                    {isLocal && proxyUrl && (
+                                                        <button
+                                                            onClick={() => window.open(proxyUrl, '_blank')}
+                                                            className="p-1.5 bg-white text-gray-900 rounded-full hover:bg-indigo-600 hover:text-white shadow-sm"
+                                                            title="Open File"
+                                                        >
+                                                            <FiExternalLink size={14} />
+                                                        </button>
+                                                    )}
+                                                    {/* Open Original Link */}
+                                                    {(file.localOriginalUrl || file.originalUrl) && (
+                                                        <button
+                                                            onClick={() => window.open(file.localOriginalUrl || file.originalUrl, '_blank')}
+                                                            className="p-1.5 bg-white text-indigo-600 rounded-full hover:bg-orange-600 hover:text-white shadow-sm"
+                                                            title="Open Original File"
+                                                        >
+                                                            <FiExternalLink size={14} />
+                                                        </button>
+                                                    )}
+                                                    {/* Scan Action (New) */}
+
+                                                </div>
+
+                                                {/* Sync / Download Actions */}
+                                                {isLocal && proxyUrl ? (
                                                     <button
-                                                        onClick={() => window.open(proxyUrl, '_blank')}
-                                                        className="p-1.5 bg-white text-gray-900 rounded-full hover:bg-indigo-600 hover:text-white shadow-sm"
-                                                        title="Open File"
+                                                        onClick={() => handleDownload(proxyUrl, name)}
+                                                        className="w-full py-1.5 bg-white text-indigo-600 rounded-md text-xs font-bold hover:bg-indigo-50 flex items-center justify-center gap-1 shadow-sm"
                                                     >
-                                                        <FiExternalLink size={14} />
+                                                        {progress ? `${progress}%` : <><FiDownload size={14} /> Save</>}
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        onClick={async (e) => {
+                                                            e.stopPropagation();
+                                                            try {
+                                                                e.target.disabled = true;
+                                                                e.target.textContent = 'Syncing...';
+                                                                const toastId = toast.info("Syncing image...", { autoClose: false });
+
+                                                                await syncService.startSync(item.board_id, {
+                                                                    filtered_item_ids: [String(item.id)],
+                                                                    showImages: true,
+                                                                    optimizeImages: true
+                                                                });
+
+                                                                toast.dismiss(toastId);
+                                                                toast.success("Image synced!");
+                                                                // Trigger update? The parent usually polls or we might need to force refresh item.
+                                                                // For now, user has to refresh or wait for poll using JobHistory
+                                                            } catch (err) {
+                                                                console.error(err);
+                                                                toast.error("Sync Failed");
+                                                                e.target.disabled = false;
+                                                                e.target.textContent = 'Retry';
+                                                            }
+                                                        }}
+                                                        className="w-full py-1.5 bg-indigo-600 text-white rounded-md text-xs font-bold hover:bg-indigo-700 flex items-center justify-center gap-1 shadow-md border border-indigo-500"
+                                                    >
+                                                        <FiRefreshCw size={14} /> Get Image
                                                     </button>
                                                 )}
                                             </div>
 
-                                            {/* Sync / Download Actions */}
-                                            {isLocal && proxyUrl ? (
-                                                <button
-                                                    onClick={() => handleDownload(proxyUrl, name)}
-                                                    className="w-full py-1.5 bg-white text-indigo-600 rounded-md text-xs font-bold hover:bg-indigo-50 flex items-center justify-center gap-1 shadow-sm"
-                                                >
-                                                    {progress ? `${progress}%` : <><FiDownload size={14} /> Save</>}
-                                                </button>
-                                            ) : (
-                                                <button
-                                                    onClick={async (e) => {
-                                                        e.stopPropagation();
-                                                        try {
-                                                            e.target.disabled = true;
-                                                            e.target.textContent = 'Syncing...';
-                                                            const toastId = toast.info("Syncing image...", { autoClose: false });
-
-                                                            await syncService.startSync(item.board_id, {
-                                                                filtered_item_ids: [String(item.id)],
-                                                                showImages: true,
-                                                                optimizeImages: true
-                                                            });
-
-                                                            toast.dismiss(toastId);
-                                                            toast.success("Image synced!");
-                                                            // Trigger update? The parent usually polls or we might need to force refresh item.
-                                                            // For now, user has to refresh or wait for poll using JobHistory
-                                                        } catch (err) {
-                                                            console.error(err);
-                                                            toast.error("Sync Failed");
-                                                            e.target.disabled = false;
-                                                            e.target.textContent = 'Retry';
-                                                        }
-                                                    }}
-                                                    className="w-full py-1.5 bg-indigo-600 text-white rounded-md text-xs font-bold hover:bg-indigo-700 flex items-center justify-center gap-1 shadow-md border border-indigo-500"
-                                                >
-                                                    <FiRefreshCw size={14} /> Get Image
-                                                </button>
-                                            )}
+                                            {/* Metadata Footer */}
+                                            <div className="p-2 bg-white border-t border-gray-100">
+                                                <p className="text-xs font-medium text-gray-900 truncate" title={name}>{name}</p>
+                                                <p className="text-[10px] text-gray-400">
+                                                    {file.size ? (file.size / 1024).toFixed(0) + ' KB' : 'Unknown Size'}
+                                                </p>
+                                            </div>
                                         </div>
-
-                                        {/* Metadata Footer */}
-                                        <div className="p-2 bg-white border-t border-gray-100">
-                                            <p className="text-xs font-medium text-gray-900 truncate" title={name}>{name}</p>
-                                            <p className="text-[10px] text-gray-400">
-                                                {file.size ? (file.size / 1024).toFixed(0) + ' KB' : 'Unknown Size'}
-                                            </p>
-                                        </div>
-                                    </div>
-                                );
-                            })}
+                                    );
+                                })}
+                            </div>
                         </div>
-                    </div>
-                )}
+                    )
+                }
                 {/* Details */}
                 <div>
                     <h3 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Item Details</h3>
@@ -884,8 +906,9 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
                         </dl>
                     )}
                 </div>
-            </div>
-        </div>
+            </div >
+
+        </div >
     );
 
     if (inline) return content;
@@ -903,8 +926,27 @@ const ItemDetailsDrawer = ({ item, onClose, showImages, optimizeImages, columnsM
 };
 
 // Component: Full Screen Image Gallery Modal
-const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsMap, onItemUpdate, onAssetUpdate, editableColumns, onNext, onPrev, hasNext, hasPrev, refreshKey, onRotationComplete, enterpriseSync, keepOriginals }) => {
+const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsMap, onItemUpdate, onAssetUpdate, editableColumns, onNext, onPrev, hasNext, hasPrev, refreshKey, onRotationComplete, enterpriseSync, keepOriginals, onScan }) => {
     const [currentIndex, setCurrentIndex] = useState(item?.initialIndex || 0);
+    const [viewOriginal, setViewOriginal] = useState(false); // Toggle between Optimized and Original
+
+    // --- Scanner State ---
+    const [isScanning, setIsScanning] = useState(false);
+    const [scanMode, setScanMode] = useState(() => localStorage.getItem('erp_scanner_mode') || 'barcode'); // 'barcode' | 'ocr'
+    const [scanTool, setScanTool] = useState('select'); // 'select' | 'pan'
+    const [scanResult, setScanResult] = useState(null);
+    const [ocrProgress, setOcrProgress] = useState(0);
+    const [crop, setCrop] = useState({ x: 0, y: 0, width: 0, height: 0 }); // Percentages - start with no box
+    const [interactionMode, setInteractionMode] = useState('none'); // 'none', 'drawing', 'moving', 'resizing'
+    const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+    const [startCrop, setStartCrop] = useState({ x: 0, y: 0, width: 0, height: 0 });
+    const [activeHandle, setActiveHandle] = useState(null);
+    const overlayRef = useRef(null); // Ref for scanner overlay
+    const [imageLoaded, setImageLoaded] = useState(false); // Track if main image ref is ready
+    const [showScanSettings, setShowScanSettings] = useState(false);
+    const [selectedSaveColumn, setSelectedSaveColumn] = useState(() => localStorage.getItem('erp_scanner_column')); // Column to save scan result
+    const [boardColumns, setBoardColumns] = useState([]); // Board column configuration
+
     const [showDownloadMenu, setShowDownloadMenu] = useState(false);
     const [showExtractMenu, setShowExtractMenu] = useState(false); // New state for Smart Tools dropdown
     const [switchNotification, setSwitchNotification] = useState(null); // Item switch visual feedback
@@ -916,6 +958,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
     // Removed "Viewing Item" toast state as per user request (reduced noise)
 
     const downloadMenuRef = useRef(null);
+    const imageRef = useRef(null); // Added missing ref
     const images = getItemImages(item, optimizeImages);
     const saveTimeoutRef = useRef(null);
     const toast = useToast();
@@ -925,20 +968,6 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
         else toast.info(message);
     };
 
-    // Magic Extraction State - RECTANGLE MODE
-    const [isMagicMode, setIsMagicMode] = useState(false);
-    const [isDragging, setIsDragging] = useState(false);
-
-    // Restore missing state for Magic Extract
-    const [dragStart, setDragStart] = useState(null); // {x, y} relative to image
-    const [dragEnd, setDragEnd] = useState(null);     // {x, y} relative to image
-    const [isExtracting, setIsExtracting] = useState(false);
-    const [extractionResult, setExtractionResult] = useState(null);
-
-    const [scanResults, setScanResults] = useState(null); // Array of { rect, data, type }
-    const imageRef = useRef(null);
-
-    // Pan State (Hand Tool)
     const [pan, setPan] = useState({ x: 0, y: 0 });
     const [isPanning, setIsPanning] = useState(false);
     const panStartRef = useRef({ x: 0, y: 0 });
@@ -952,7 +981,6 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
         // setRotation(currentImage?.rotation || 0); // Removed for permanent rotation
         setZoom(1);
         setPan({ x: 0, y: 0 });
-        setScanResults(null);
     }, [currentIndex]);
 
     // Fix: Valid reset when Item Changes (since component is reused without unmount)
@@ -963,10 +991,74 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
             setCurrentIndex(item?.initialIndex || 0);
             setSwitchNotification(item?.name);
             const timer = setTimeout(() => setSwitchNotification(null), 1500);
+
+            // Scanner Resets - DO NOT reset isScanning to allow continuous flow
+            setScanResult(null);
+
             prevItemIdRef.current = item?.id;
             return () => clearTimeout(timer);
         }
     }, [item]);
+
+    // Persist Scanner Mode
+    useEffect(() => {
+        localStorage.setItem('erp_scanner_mode', scanMode);
+    }, [scanMode]);
+
+    // Fetch board columns for scanner settings
+    useEffect(() => {
+        const fetchBoardColumns = async () => {
+            if (item?.board_id) {
+                console.log("Fetching board columns for board_id:", item.board_id);
+                try {
+                    const response = await api.get(`/integrations/monday/boards/${item.board_id}/columns`);
+                    console.log("Board columns response:", response.data);
+
+                    if (response.data?.columns) {
+                        console.log("Raw columns:", response.data.columns);
+                        // Filter to show only editable column types
+                        const editableTypes = ['text', 'long-text', 'status', 'dropdown', 'numbers', 'phone', 'email', 'link'];
+                        const editableColumns = response.data.columns.filter(col =>
+                            editableTypes.includes(col.type)
+                        );
+                        console.log("Editable columns:", editableColumns);
+                        setBoardColumns(editableColumns);
+                    } else {
+                        console.warn("No columns in response");
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch board columns:", err);
+                    console.error("Error details:", err.response?.data);
+                }
+            } else {
+                console.warn("No board_id available, item:", item);
+            }
+        };
+        fetchBoardColumns();
+    }, [item?.board_id]);
+
+    // Persistence Effects
+    useEffect(() => {
+        localStorage.setItem('erp_scanner_mode', scanMode);
+    }, [scanMode]);
+
+    useEffect(() => {
+        if (selectedSaveColumn) {
+            localStorage.setItem('erp_scanner_column', selectedSaveColumn);
+        }
+    }, [selectedSaveColumn]);
+
+    // Auto-select first column if none selected AND none in localStorage
+    useEffect(() => {
+        if (boardColumns.length > 0 && !selectedSaveColumn) {
+            const saved = localStorage.getItem('erp_scanner_column');
+            if (saved && boardColumns.some(c => c.id === saved)) {
+                setSelectedSaveColumn(saved);
+            } else {
+                setSelectedSaveColumn(boardColumns[0].id);
+            }
+        }
+    }, [boardColumns, selectedSaveColumn]);
 
     // Removed Toast Timer
 
@@ -980,14 +1072,14 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
         });
     };
     const handleWheel = (e) => {
-        if (e.ctrlKey || isMagicMode) return;
+        if (e.ctrlKey) return;
         if (e.deltaY < 0) handleZoomIn();
         else handleZoomOut();
     };
 
     // Pan Handlers
     const handlePanMouseDown = (e) => {
-        if (isMagicMode || zoom <= 1) return;
+        if (zoom <= 1) return;
         e.preventDefault();
         setIsPanning(true);
         panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
@@ -1005,71 +1097,305 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
         setIsPanning(false);
     };
 
-    // ... (keep getRelativeCoords)
+    // --- Scanner Helpers & Handlers ---
+    const getCoords = (e) => {
+        // Always use the overlay ref for coordinate calculation
+        // This ensures consistency regardless of which element triggered the event
+        if (!overlayRef.current) {
+            console.warn("overlayRef not available");
+            return { x: 50, y: 50 };
+        }
 
-    const handleScanCodes = async (forceAI = false) => {
-        const currentImg = images[currentIndex];
-        if (!currentImg) return;
+        const rect = overlayRef.current.getBoundingClientRect();
+        const clientX = e.clientX || e.touches?.[0]?.clientX;
+        const clientY = e.clientY || e.touches?.[0]?.clientY;
 
-        setIsExtracting(true);
-        setScanResults(null); // Clear previous
+        console.log("getCoords:", {
+            clientX,
+            clientY,
+            rectLeft: rect.left,
+            rectTop: rect.top,
+            rectWidth: rect.width,
+            rectHeight: rect.height
+        });
+
+        const x = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
+        const y = Math.max(0, Math.min(100, ((clientY - rect.top) / rect.height) * 100));
+
+        console.log("Calculated coords:", { x, y });
+        return { x, y };
+    };
+
+    const handleScanMouseDown = (e, mode, handle = null) => {
+        // Allow panning if tool is 'pan' or middle (1) or right (2) mouse button
+        if (scanTool === 'pan' || e.button === 1 || e.button === 2) {
+            handlePanMouseDown(e);
+            return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation(); // Prevent panning
+
+        const coords = getCoords(e);
+        setDragStart(coords);
+        setStartCrop({ ...crop });
+        setInteractionMode(mode);
+        setActiveHandle(handle);
+
+        if (mode === 'drawing') {
+            setCrop({ x: coords.x, y: coords.y, width: 0, height: 0 });
+            setStartCrop({ x: coords.x, y: coords.y, width: 0, height: 0 });
+        }
+    };
+
+    const handleScanMouseMove = (e) => {
+        if (interactionMode === 'none') return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        const current = getCoords(e);
+
+        if (interactionMode === 'moving') {
+            const deltaX = current.x - dragStart.x;
+            const deltaY = current.y - dragStart.y;
+            let newX = Math.max(0, Math.min(100 - startCrop.width, startCrop.x + deltaX));
+            let newY = Math.max(0, Math.min(100 - startCrop.height, startCrop.y + deltaY));
+            setCrop(prev => ({ ...prev, x: newX, y: newY }));
+        }
+        else if (interactionMode === 'drawing') {
+            const minX = Math.min(dragStart.x, current.x);
+            const minY = Math.min(dragStart.y, current.y);
+            const width = Math.abs(current.x - dragStart.x);
+            const height = Math.abs(current.y - dragStart.y);
+            setCrop({ x: minX, y: minY, width, height });
+        }
+        else if (interactionMode === 'resizing') {
+            let { x, y, width, height } = startCrop;
+            const deltaX = current.x - dragStart.x;
+            const deltaY = current.y - dragStart.y;
+
+            if (activeHandle === 'nw') { x += deltaX; y += deltaY; width -= deltaX; height -= deltaY; }
+            else if (activeHandle === 'ne') { y += deltaY; width += deltaX; height -= deltaY; }
+            else if (activeHandle === 'sw') { x += deltaX; width -= deltaX; height += deltaY; }
+            else if (activeHandle === 'se') { width += deltaX; height += deltaY; }
+
+            if (width < 0) { x += width; width = Math.abs(width); }
+            if (height < 0) { y += height; height = Math.abs(height); }
+            if (x < 0) { width += x; x = 0; }
+            if (y < 0) { height += y; y = 0; }
+            if (x + width > 100) { width = 100 - x; }
+            if (y + height > 100) { height = 100 - y; }
+
+            setCrop({ x, y, width, height });
+        }
+    };
+
+    const handleScanMouseUp = () => {
+        setInteractionMode('none');
+        setActiveHandle(null);
+        if (crop.width < 5 || crop.height < 5) {
+            if (interactionMode === 'drawing' && crop.width === 0) setCrop({ x: 20, y: 30, width: 60, height: 40 });
+        }
+    };
+
+    // Save scan result to selected column
+    const handleSaveToColumn = async (result) => {
+        if (!selectedSaveColumn || !result) {
+            toast.error("No column selected or no result to save");
+            return;
+        }
 
         try {
-            if (!currentImg.itemId || !currentImg.assetId) {
-                showToast("Cannot scan: Image metadata missing", "error");
-                setIsExtracting(false);
+            if (onItemUpdate) {
+                // Call the parent handler which handles API + Local State + Success Toast
+                await onItemUpdate(item.id, { [selectedSaveColumn]: result });
+
+                // Clear the crop box immediately on save
+                setCrop({ x: 0, y: 0, width: 0, height: 0 });
+                setInteractionMode('none');
+
+                // Auto-advance logic
+                if (onNext || (images.length > 1 && currentIndex < images.length - 1)) {
+                    toast.info("Auto-advancing to next item...");
+                    setTimeout(() => {
+                        if (currentIndex < images.length - 1) {
+                            setCurrentIndex(prev => prev + 1);
+                        } else if (onNext) {
+                            onNext();
+                        }
+                        setScanResult(null); // Clear result for next item
+                    }, 1000);
+                }
+            } else {
+                // Fallback (unlikely)
+                await api.put(`/integrations/monday/items/${item.id}`, {
+                    board_id: item.board_id,
+                    column_values: { [selectedSaveColumn]: result }
+                });
+                toast.success("Saved successfully");
+            }
+        } catch (err) {
+            console.error("Save to column failed:", err);
+            toast.error("Failed to save: " + (err.response?.data?.detail || err.message || "Unknown error"));
+        }
+    };
+
+    // Copy result to clipboard
+    const handleCopyResult = (result) => {
+        if (!result) {
+            toast.error("No result to copy");
+            return;
+        }
+
+        navigator.clipboard.writeText(result).then(() => {
+            toast.success("Copied to clipboard!");
+        }).catch(err => {
+            console.error("Copy failed:", err);
+            toast.error("Failed to copy");
+        });
+    };
+
+    const scanBlob = async (blob, label) => {
+        if (!blob) return { text: null, error: "No blob" };
+        const file = new File([blob], `scan_${label}.png`, { type: "image/png" });
+        try {
+            const html5QrCode = new Html5Qrcode("barcode-scanner-hidden-element", {
+                experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+                verbose: false
+            });
+            const result = await html5QrCode.scanFileV2(file, true);
+            if (result && result.decodedText) return { text: result.decodedText, error: null };
+        } catch (e) {
+            return { text: null, error: e.message || String(e) };
+        }
+        return { text: null, error: "Unknown error" };
+    };
+
+    const processImage = (ctx, width, height, mode) => {
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const data = imageData.data;
+
+        if (mode === 'grayscale_contrast') {
+            let totalLumina = 0;
+            for (let i = 0; i < data.length; i += 4) totalLumina += (data[i] * 0.299) + (data[i + 1] * 0.587) + (data[i + 2] * 0.114);
+            const avgLumina = totalLumina / (data.length / 4);
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = (data[i] * 0.299) + (data[i + 1] * 0.587) + (data[i + 2] * 0.114);
+                const val = gray > avgLumina ? 255 : 0;
+                data[i] = data[i + 1] = data[i + 2] = val;
+            }
+        } else {
+            for (let i = 0; i < data.length; i += 4) {
+                if (mode === 'invert') {
+                    data[i] = 255 - data[i];     // R
+                    data[i + 1] = 255 - data[i + 1]; // G
+                    data[i + 2] = 255 - data[i + 2]; // B
+                } else if (mode === 'grayscale') {
+                    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                    data[i] = data[i + 1] = data[i + 2] = gray;
+                }
+            }
+        }
+        ctx.putImageData(imageData, 0, 0);
+    };
+
+    const handleRunScan = async () => {
+        if (!imageRef.current) return;
+        setOcrProgress(0);
+        setScanResult(null);
+        let lastError = null;
+
+        try {
+            const image = imageRef.current;
+            const naturalWidth = image.naturalWidth;
+            const naturalHeight = image.naturalHeight;
+
+            const cropX = (crop.x / 100) * naturalWidth;
+            const cropY = (crop.y / 100) * naturalHeight;
+            const cropW = (crop.width / 100) * naturalWidth;
+            const cropH = (crop.height / 100) * naturalHeight;
+
+            if (cropW <= 0 || cropH <= 0) {
+                toast.error("Invalid selection area.");
                 return;
             }
 
-            showToast(forceAI ? "Ô£¿ Magic Scan (AI) analyzing..." : "Scanning image...", "info");
+            // Scaling & Padding
+            const MIN_WIDTH = 800;
+            const scaleFactor = Math.max(1, MIN_WIDTH / cropW);
+            const scaledW = cropW * scaleFactor;
+            const scaledH = cropH * scaleFactor;
+            const padding = 40;
 
-            const res = await api.post(`/integrations/monday/items/${currentImg.itemId}/assets/${currentImg.assetId}/extract`, {
-                // No crop rect = full image
-                rotation: 0, // Scan the original image. Backend handles multi-angle check now!
-                force_ai: forceAI // Pass the flag
-            });
+            const canvas = document.createElement('canvas');
+            canvas.width = scaledW + (padding * 2);
+            canvas.height = scaledH + (padding * 2);
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            ctx.imageSmoothingEnabled = false;
 
-            console.log("DEBUG_SCAN: Extraction Response:", res.data); // Log full response for user
+            const clearCanvas = () => { ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, canvas.width, canvas.height); };
+            const drawScaled = () => { ctx.drawImage(image, cropX, cropY, cropW, cropH, padding, padding, scaledW, scaledH); };
+            const getCanvasBlob = () => new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
 
-            if (res.data.success || res.data.codes) {
-                // Toast logic or just set results
-                // Ensure codes is array
-                const codes = res.data.codes || [];
-                setScanResults(codes);
-                if (codes.length === 0) {
-                    showToast("No barcodes or QR codes found.", "info");
-                } else if (codes.length > 0) {
-                    showToast(`Found ${codes.length} codes! Click boxes to copy.`, "success");
+            // --- OCR MODE ---
+            if (scanMode === 'ocr') {
+                toast.info("Processing...", "Extracting text...");
+                clearCanvas();
+                drawScaled();
+                processImage(ctx, canvas.width, canvas.height, 'grayscale');
+
+                const dataUrl = canvas.toDataURL('image/png');
+                const result = await Tesseract.recognize(dataUrl, 'eng', {
+                    logger: m => { if (m.status === 'recognizing text') setOcrProgress(Math.round(m.progress * 100)); }
+                });
+
+                if (result && result.data && result.data.text.trim().length > 0) {
+                    setScanResult(result.data.text);
+                    toast.success("Success", "Text Extracted!");
+                } else {
+                    toast.error("No Text Found", "Could not extract text.");
                 }
+                return;
             }
 
+            // --- BARCODE MODE ---
+            toast.info("Scanning...", "Analyzing barcode...");
+
+            // Strategy 1: Normal
+            clearCanvas(); drawScaled();
+            let blob = await getCanvasBlob();
+            let result = await scanBlob(blob, 'normal');
+            if (result.text) { setScanResult(result.text); toast.success("Barcode Detected!"); return; }
+            lastError = result.error;
+
+            // Strategy 2: Grayscale
+            clearCanvas(); drawScaled(); processImage(ctx, canvas.width, canvas.height, 'grayscale');
+            blob = await getCanvasBlob(); result = await scanBlob(blob, 'grayscale');
+            if (result.text) { setScanResult(result.text); toast.success("Barcode Detected!"); return; }
+
+            // Strategy 3: Inverted 
+            clearCanvas(); drawScaled(); processImage(ctx, canvas.width, canvas.height, 'invert');
+            blob = await getCanvasBlob(); result = await scanBlob(blob, 'inverted');
+            if (result.text) { setScanResult(result.text); toast.success("Barcode Detected!"); return; }
+
+            // Strategy 4: High Contrast
+            clearCanvas(); drawScaled(); processImage(ctx, canvas.width, canvas.height, 'grayscale_contrast');
+            blob = await getCanvasBlob(); result = await scanBlob(blob, 'high_contrast');
+            if (result.text) { setScanResult(result.text); toast.success("Barcode Detected!"); return; }
+
+            toast.error("Scan Failed", "Could not detect barcode.");
+
         } catch (e) {
-            console.error("Scan failed", e);
-            showToast("Scan failed. Check console.", "error");
-        } finally {
-            setIsExtracting(false);
+            console.error("Scan Error:", e);
+            toast.error("Error", e.message);
         }
     };
 
-    const getRelativeCoords = (e) => {
-        if (!imageRef.current) return null;
-        const rect = imageRef.current.getBoundingClientRect();
+    // ... (keep getRelativeCoords)
 
-        // Strict check: If outside the image, return null
-        if (
-            e.clientX < rect.left ||
-            e.clientX > rect.right ||
-            e.clientY < rect.top ||
-            e.clientY > rect.bottom
-        ) {
-            return null;
-        }
 
-        return {
-            x: Math.min(Math.max(0, e.clientX - rect.left), rect.width),
-            y: Math.min(Math.max(0, e.clientY - rect.top), rect.height)
-        };
-    };
+
+
 
 
 
@@ -1078,203 +1404,6 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
     const dragEndRef = useRef(null);
 
     // --- Fetch Barcode Config ---
-    const fetchBarcodeConfig = async () => {
-        try {
-            const res = await marketplaceService.monday.getBarcodeConfig();
-            if (res.data) {
-                // Find config for this board
-                const myConfig = res.data.find(c => String(c.board_id) === String(item.boardId)); // Assuming item has boardId
-                // setBarcodeConfig(myConfig); // This state is in MondayAppView, not here
-            }
-        } catch (e) {
-            console.error("Failed to load barcode config", e);
-        }
-    };
-
-    // Load initial data
-    useEffect(() => {
-        if (!item?.boardId) return;
-        // fetchBarcodeConfig(); // This should be done in the parent component (MondayAppView)
-
-        // Auto-refresh items
-        // const interval = setInterval(() => {
-        //     if (!isEditMode && !enterpriseSync.isSyncing) {
-        //         // Background refresh disabled for now to avoid flickering
-        //         // fetchBoardItems(boardId);
-        //     }
-        // }, 30000);
-        // return () => clearInterval(interval);
-    }, [item?.boardId]);
-
-    const handleSaveConfig = async (newConfig) => {
-        await marketplaceService.monday.saveBarcodeConfig(newConfig);
-        // showToast...
-        // fetchBarcodeConfig(); // Refresh
-        // handleSync(); // Auto-Sync to apply changes
-    };
-    // Global Drag Listeners
-    useEffect(() => {
-        const handleGlobalMouseMove = (e) => {
-            if (!isDragging) return;
-            const coords = getRelativeCoords(e);
-            if (coords) {
-                dragEndRef.current = coords;
-                setDragEnd(coords);
-            }
-        };
-
-        const handleGlobalMouseUp = () => {
-            if (!isDragging) return;
-            setIsDragging(false);
-
-            const start = dragStartRef.current;
-            const end = dragEndRef.current;
-
-            if (start && end) {
-                const width = Math.abs(end.x - start.x);
-                const height = Math.abs(end.y - start.y);
-
-                if (width > 10 && height > 10) {
-                    handleExtract(start, end);
-                } else {
-                    setDragStart(null);
-                    setDragEnd(null);
-                }
-            } else {
-                setDragStart(null);
-                setDragEnd(null);
-            }
-        };
-
-        if (isDragging) {
-            window.addEventListener('mousemove', handleGlobalMouseMove);
-            window.addEventListener('mouseup', handleGlobalMouseUp);
-        }
-        return () => {
-            window.removeEventListener('mousemove', handleGlobalMouseMove);
-            window.removeEventListener('mouseup', handleGlobalMouseUp);
-        };
-    }, [isDragging]);
-
-    const handleMagicMouseDown = (e) => {
-        if (!isMagicMode || isExtracting) return;
-        e.preventDefault();
-        e.stopPropagation();
-
-        const coords = getRelativeCoords(e);
-        if (!coords) return;
-
-        dragStartRef.current = coords;
-        dragEndRef.current = coords;
-
-        setIsDragging(true);
-        setDragStart(coords);
-        setDragEnd(coords);
-    };
-
-    // Calculate Rect props for rendering/cropping
-    const getRect = (p1, p2) => {
-        if (!p1 || !p2) return null;
-        return {
-            x: Math.min(p1.x, p2.x),
-            y: Math.min(p1.y, p2.y),
-            width: Math.abs(p1.x - p2.x),
-            height: Math.abs(p1.y - p2.y)
-        };
-    };
-
-    const handleExtract = async (start, end) => {
-        if (!imageRef.current) return;
-        setIsExtracting(true);
-
-        try {
-            const img = imageRef.current;
-            const naturalWidth = img.naturalWidth;
-            const naturalHeight = img.naturalHeight;
-            const displayWidth = img.width;
-            const displayHeight = img.height;
-
-            const scaleX = naturalWidth / displayWidth;
-            const scaleY = naturalHeight / displayHeight;
-
-            const rect = getRect(start, end);
-
-            // Create canvas for cropping
-            const canvas = document.createElement('canvas');
-            canvas.width = rect.width * scaleX;
-            canvas.height = rect.height * scaleY;
-            const ctx = canvas.getContext('2d');
-
-            // Draw Image Snippet
-            // drawImage(image, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
-            ctx.drawImage(
-                img,
-                rect.x * scaleX,
-                rect.y * scaleY,
-                rect.width * scaleX,
-                rect.height * scaleY,
-                0, 0,
-                canvas.width,
-                canvas.height
-            );
-
-            // Convert to Blob
-            try {
-                canvas.toBlob(async (blob) => {
-                    if (!blob) throw new Error("Canvas blob creation failed");
-
-                    const formData = new FormData();
-                    formData.append('file', blob, 'extract.png');
-
-                    try {
-                        const res = await marketplaceService.monday.extractFile(formData);
-                        setExtractionResult(res.data);
-                    } catch (err) {
-                        console.error("Extraction failed", err);
-                        setExtractionResult({ error: "Extraction failed. Backend might be missing tools." });
-                    } finally {
-                        setIsExtracting(false);
-                        // Keep selection visible
-                        // setDragStart(null); setDragEnd(null); setIsDragging(false); setIsMagicMode(false);
-                        setIsDragging(false);
-                    }
-                }, 'image/png');
-            } catch (blobError) {
-                // Tainted Canvas -> Fallback is EXPECTED for remote images.
-                console.log("Ôä╣´©Å Switching to Server-Side Extraction (Remote/CORS Image)...");
-
-                const currentImg = images[currentIndex];
-                if (!currentImg || !currentImg.itemId || !currentImg.assetId) {
-                    setExtractionResult({ error: "Cannot extract from this image (Remote & Tainted)." });
-                    setIsExtracting(false);
-                    return;
-                }
-
-                try {
-                    const res = await marketplaceService.monday.extractImage(currentImg.itemId, currentImg.assetId, {
-                        crop: {
-                            x: rect.x * scaleX,
-                            y: rect.y * scaleY,
-                            w: rect.width * scaleX,
-                            h: rect.height * scaleY
-                        },
-                        rotation: 0
-                    });
-                    setExtractionResult(res.data);
-                } catch (serverErr) {
-                    console.error("Server extraction failed", serverErr);
-                    setExtractionResult({ error: "Server extraction failed." });
-                } finally {
-                    setIsExtracting(false);
-                    setIsDragging(false);
-                }
-            }
-
-        } catch (e) {
-            console.error("Crop error", e);
-            setIsExtracting(false);
-        }
-    };
 
 
     // Clean up timeout
@@ -1385,12 +1514,6 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (e.key === 'Escape') {
-                if (isMagicMode) {
-                    setIsMagicMode(false);
-                    setDragStart(null);
-                    setDragEnd(null);
-                    return;
-                }
                 onClose();
             }
             if (e.key === 'ArrowRight') handleNext();
@@ -1404,7 +1527,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [images.length, isMagicMode, showDetails, zoom, currentIndex]);
+    }, [images.length, showDetails, zoom, currentIndex]);
 
     const handleForceDownload = async (url, filename) => {
         try {
@@ -1441,6 +1564,13 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
 
     return (
         <div className="fixed inset-0 z-[100] bg-black bg-opacity-95 flex flex-row overflow-hidden">
+            <style>{`
+                @keyframes scanner-pan {
+                    0% { transform: translateY(0); }
+                    50% { transform: translateY(100%); opacity: 0.8; }
+                    100% { transform: translateY(0); }
+                }
+            `}</style>
             {/* Left Side: Image & Controls */}
             <div className="flex-1 flex flex-col relative min-w-0 bg-black/50">
                 {/* Header */}
@@ -1471,76 +1601,84 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                             </button>
                         </div>
 
-                        {/* 2. Smart Tools Dropdown */}
-                        <div className="relative">
+                        {/* 2. Scan Toggle (Replaces Smart Tools) */}
+                        <div className="flex items-center gap-1 bg-white/10 backdrop-blur-md rounded-lg p-1 border border-white/5">
                             <button
-                                onClick={() => setShowExtractMenu(!showExtractMenu)}
-                                className={`h-10 px-3 rounded-lg flex items-center gap-2 border transition-all ${isMagicMode ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg' : 'bg-white/10 border-white/10 text-gray-200 hover:bg-white/20 hover:text-white'}`}
-                                title="Smart Extraction Tools"
+                                onClick={() => {
+                                    if (isScanning) {
+                                        console.log("Disabling scan mode");
+                                        setIsScanning(false);
+                                        setScanResult(null);
+                                    } else {
+                                        console.log("Enabling scan mode");
+                                        setIsScanning(true);
+                                        setScanMode('barcode');
+                                        setInteractionMode('none');
+                                        // Start with no crop - user draws from scratch
+                                        setCrop({ x: 0, y: 0, width: 0, height: 0 });
+                                        console.log("Scan mode enabled, ready to draw");
+                                    }
+                                }}
+                                className={`h-8 px-3 rounded-md flex items-center gap-2 transition-all ${isScanning ? 'bg-teal-500 text-white shadow-lg shadow-teal-500/20' : 'text-gray-200 hover:bg-white/20 hover:text-white'}`}
+                                title="Toggle Scan Mode"
                             >
-                                <FiCpu className="w-5 h-5" />
-                                <span className="hidden sm:inline text-sm font-medium">Smart Tools</span>
-                                <FiChevronDown className={`w-4 h-4 transition-transform ${showExtractMenu ? 'rotate-180' : ''}`} />
+                                <FiCrop className="w-4 h-4" />
+                                <span className="hidden sm:inline text-sm font-medium">{isScanning ? 'Done' : 'Scan'}</span>
                             </button>
 
-                            {/* Dropdown Menu */}
-                            {showExtractMenu && (
-                                <>
-                                    <div className="fixed inset-0 z-[60]" onClick={() => setShowExtractMenu(false)}></div>
-                                    <div className="absolute top-12 right-0 w-64 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-[70] overflow-hidden flex flex-col p-1 animate-in fade-in zoom-in-95 duration-200">
-                                        <div className="px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">Extraction & AI</div>
+                            {/* Scanner Settings Button */}
+                            {isScanning && (
+                                <div className="relative">
+                                    <button
+                                        onClick={() => setShowScanSettings(!showScanSettings)}
+                                        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all ${showScanSettings ? 'bg-teal-600 text-white' : 'text-gray-300 hover:bg-white/20 hover:text-white'}`}
+                                        title="Scanner Settings"
+                                    >
+                                        <FiSettings className="w-4 h-4" />
+                                    </button>
 
-                                        <button
-                                            onClick={() => {
-                                                if (isMagicMode) {
-                                                    setIsMagicMode(false);
-                                                    setDragStart(null); setDragEnd(null);
-                                                } else {
-                                                    setIsMagicMode(true);
-                                                    // setRotation(0); // Removed
-                                                    setShowExtractMenu(false);
-                                                }
-                                            }}
-                                            className={`flex items-center gap-3 px-3 py-3 rounded-lg text-sm text-left transition-colors ${isMagicMode ? 'bg-indigo-600 text-white' : 'text-gray-200 hover:bg-gray-800'}`}
-                                        >
-                                            <FiCrop className="w-5 h-5" />
-                                            <div>
-                                                <div className="font-medium">Magic Crop</div>
-                                                <div className="text-xs opacity-70">Manually select area for OCR</div>
+                                    {/* Settings Dropdown */}
+                                    {showScanSettings && (
+                                        <>
+                                            <div className="fixed inset-0 z-[60]" onClick={() => setShowScanSettings(false)}></div>
+                                            <div className="absolute top-10 right-0 w-64 bg-white rounded-lg shadow-xl z-[70] overflow-hidden border border-gray-200 animate-in fade-in zoom-in-95 duration-200">
+                                                <div className="p-3 border-b border-gray-200 bg-gray-50">
+                                                    <h3 className="text-sm font-semibold text-gray-700">Scanner Settings</h3>
+                                                </div>
+                                                <div className="p-3">
+                                                    <label className="block text-xs font-medium text-gray-600 mb-2">Save Result To Column:</label>
+                                                    <div className="flex gap-2">
+                                                        <select
+                                                            value={selectedSaveColumn || ''}
+                                                            onChange={(e) => {
+                                                                const val = e.target.value || null;
+                                                                setSelectedSaveColumn(val);
+                                                                if (val) {
+                                                                    const colObj = boardColumns.find(c => c.id === val);
+                                                                    toast.success(`Target column: ${colObj?.title || val}`);
+                                                                }
+                                                            }}
+                                                            className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500 bg-white text-gray-900"
+                                                        >
+                                                            <option value="" className="text-gray-900">Don't save (copy only)</option>
+                                                            {boardColumns.map(column => (
+                                                                <option key={column.id} value={column.id} className="text-gray-900">
+                                                                    {column.title}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                        <div className="flex-none bg-teal-50 text-teal-600 border border-teal-200 rounded-md px-2 flex items-center justify-center" title="Column selected">
+                                                            <FiCheck className="w-4 h-4" />
+                                                        </div>
+                                                    </div>
+                                                    <p className="text-xs text-gray-500 mt-2">Select a column to automatically save scan results</p>
+                                                </div>
                                             </div>
-                                        </button>
-
-                                        <button
-                                            onClick={() => { handleScanCodes(false); setShowExtractMenu(false); }}
-                                            className="flex items-center gap-3 px-3 py-3 rounded-lg text-sm text-left text-gray-200 hover:bg-gray-800 transition-colors"
-                                        >
-                                            <FiZap className="w-5 h-5 text-yellow-400" />
-                                            <div>
-                                                <div className="font-medium">Scan Barcodes</div>
-                                                <div className="text-xs text-gray-400">Local QR/Barcode detection</div>
-                                            </div>
-                                        </button>
-
-                                        <div className="my-1 border-t border-gray-800"></div>
-
-                                        <button
-                                            onClick={() => { handleScanCodes(true); setShowExtractMenu(false); }}
-                                            className="flex items-center gap-3 px-3 py-3 rounded-lg text-sm text-left text-gray-200 hover:bg-gray-800 transition-colors group"
-                                        >
-                                            <span className="text-lg group-hover:scale-110 transition-transform">
-                                                <FiZap className="text-yellow-500" />
-                                            </span>
-                                            <div>
-                                                <div className="font-medium bg-gradient-to-r from-purple-400 to-indigo-400 bg-clip-text text-transparent">AI Magic Scan</div>
-                                                <div className="text-xs text-gray-400">Deep extract Text & Data</div>
-                                            </div>
-                                        </button>
-                                    </div>
-                                </>
+                                        </>
+                                    )}
+                                </div>
                             )}
                         </div>
-
-
 
                         {/* 3. Download Button (Simplified) */}
                         <div className="relative h-10 flex items-center bg-teal-600 hover:bg-teal-500 rounded-lg text-white shadow-lg shadow-teal-900/20 transition-all border border-teal-500/50 group">
@@ -1592,8 +1730,6 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                                                 </div>
                                             </button>
                                         )}
-
-
                                     </div>
                                 </>
                             )}
@@ -1607,6 +1743,16 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                         >
                             <FiSidebar className="w-5 h-5" />
                             <span className="hidden lg:inline text-sm">{showDetails ? 'Hide' : 'Info'}</span>
+                        </button>
+
+                        {/* 5. Show Original Toggle */}
+                        <button
+                            onClick={() => setViewOriginal(!viewOriginal)}
+                            className={`h-10 px-3 rounded-lg flex items-center gap-2 border transition-all ${viewOriginal ? 'bg-indigo-600 text-white border-indigo-500 font-medium shadow-indigo-500/20 shadow-lg' : 'bg-white/10 border-white/10 text-gray-300 hover:bg-white/20 hover:text-white'}`}
+                            title={viewOriginal ? "Showing Original Image" : "Switch to Original Quality"}
+                        >
+                            <FiImage className="w-5 h-5" />
+                            <span className="hidden lg:inline text-sm">{viewOriginal ? 'Original' : 'Optimized'}</span>
                         </button>
                     </div>
                 </div>
@@ -1632,10 +1778,137 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                     )
                 }
 
+                {/* SCANNER ACTION BAR (When Scanning) */}
+                {/* SCANNER ACTION BAR (Enterprise Style) */}
+                {/* SCANNER ACTION BAR (Premium Vertical Palette Style) */}
+                {isScanning && (
+                    <div className="absolute top-24 left-6 flex flex-col gap-2 z-50 animate-in slide-in-from-left-4 duration-500 ease-out">
+                        {/* Main Tools Palette - Glassmorphic */}
+                        <div className="bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/20 dark:border-slate-700/50 p-2 flex flex-col gap-3 transition-all hover:scale-[1.02]">
+                            {/* Mode Selectors */}
+                            <button
+                                onClick={() => { setScanMode('barcode'); setScanResult(null); }}
+                                className={`group relative p-3 rounded-xl flex flex-col items-center gap-1 transition-all duration-300 ${scanMode === 'barcode' ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white shadow-lg shadow-blue-500/30' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white'}`}
+                            >
+                                <FiTarget className="w-5 h-5" />
+                                {/* Tooltip */}
+                                <span className="absolute left-full ml-3 px-2 py-1 bg-slate-800 text-white text-[10px] rounded-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none shadow-xl translate-x-2 group-hover:translate-x-0 duration-200">
+                                    Barcode Mode
+                                </span>
+                            </button>
+
+                            <button
+                                onClick={() => { setScanMode('ocr'); setScanResult(null); }}
+                                className={`group relative p-3 rounded-xl flex flex-col items-center gap-1 transition-all duration-300 ${scanMode === 'ocr' ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white shadow-lg shadow-blue-500/30' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white'}`}
+                            >
+                                <FiType className="w-5 h-5" />
+                                {/* Tooltip */}
+                                <span className="absolute left-full ml-3 px-2 py-1 bg-slate-800 text-white text-[10px] rounded-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none shadow-xl translate-x-2 group-hover:translate-x-0 duration-200">
+                                    OCR Mode
+                                </span>
+                            </button>
+
+                            {/* Scan Action */}
+                            {!scanResult && (
+                                <>
+                                    <div className="w-full h-px bg-gradient-to-r from-transparent via-slate-200 dark:via-slate-700 to-transparent my-1" />
+
+                                    {/* Tool Toggles */}
+                                    <div className="flex flex-col gap-2">
+                                        <button
+                                            onClick={() => setScanTool('select')}
+                                            className={`group relative p-3 rounded-xl flex flex-col items-center gap-1 transition-all duration-300 ${scanTool === 'select' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 shadow-inner' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                                        >
+                                            <FiCrop className="w-5 h-5" />
+                                            <span className="absolute left-full ml-3 px-2 py-1 bg-slate-800 text-white text-[10px] rounded-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none shadow-xl translate-x-2 group-hover:translate-x-0 duration-200">
+                                                Select Area
+                                            </span>
+                                        </button>
+                                        <button
+                                            onClick={() => setScanTool('pan')}
+                                            className={`group relative p-3 rounded-xl flex flex-col items-center gap-1 transition-all duration-300 ${scanTool === 'pan' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 shadow-inner' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                                        >
+                                            <FiMove className="w-5 h-5" />
+                                            <span className="absolute left-full ml-3 px-2 py-1 bg-slate-800 text-white text-[10px] rounded-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none shadow-xl translate-x-2 group-hover:translate-x-0 duration-200">
+                                                Pan Image
+                                            </span>
+                                        </button>
+                                    </div>
+
+                                    <div className="w-full h-px bg-gradient-to-r from-transparent via-slate-200 dark:via-slate-700 to-transparent my-1" />
+
+                                    <button
+                                        onClick={handleRunScan}
+                                        className="group relative p-3 rounded-xl bg-gradient-to-br from-teal-400 to-teal-600 text-white shadow-lg shadow-teal-500/30 hover:shadow-teal-500/50 hover:scale-105 active:scale-95 transition-all duration-300 flex flex-col items-center gap-1"
+                                    >
+                                        <FiZap className="w-5 h-5 group-hover:animate-pulse" />
+                                        {/* Tooltip */}
+                                        <span className="absolute left-full ml-3 px-2 py-1 bg-slate-800 text-white text-[10px] rounded-md opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none shadow-xl translate-x-2 group-hover:translate-x-0 duration-200">
+                                            Run Scan
+                                        </span>
+                                    </button>
+                                </>
+                            )}
+                        </div>
+
+                        {/* Result Panel (Expands to Right with Glassmorphism) */}
+                        {scanResult && (
+                            <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl rounded-2xl shadow-2xl border border-white/20 dark:border-slate-700/50 p-4 w-80 animate-in slide-in-from-left-8 fade-in zoom-in-95 duration-300 absolute left-full top-0 ml-4 ring-1 ring-black/5">
+                                <div className="space-y-4">
+                                    <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-2">
+                                        <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Result</span>
+                                        <button onClick={() => setScanResult(null)} className="text-gray-400 hover:text-red-500 transition-colors p-1 hover:bg-red-50 rounded-full">
+                                            <FiX className="w-4 h-4" />
+                                        </button>
+                                    </div>
+
+                                    {scanMode === 'barcode' ? (
+                                        <div className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-sm font-mono text-slate-700 dark:text-slate-300 break-all shadow-inner">
+                                            {scanResult}
+                                        </div>
+                                    ) : (
+                                        <textarea
+                                            className="w-full h-32 bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 text-sm p-3 rounded-xl border border-slate-200 dark:border-slate-800 font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all shadow-inner"
+                                            value={scanResult}
+                                            onChange={(e) => setScanResult(e.target.value)}
+                                        />
+                                    )}
+
+                                    {selectedSaveColumn && (
+                                        <div className="flex items-center gap-2 px-3 py-2 bg-blue-50/50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-lg text-xs font-medium border border-blue-100 dark:border-blue-800/50">
+                                            <FiDatabase className="w-3.5 h-3.5 flex-none" />
+                                            <span className="truncate flex-1">
+                                                Saving to: <span className="font-bold">{boardColumns.find(c => c.id === selectedSaveColumn)?.title || 'Target'}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    <div className="flex gap-2 pt-1">
+                                        <button
+                                            onClick={() => handleSaveToColumn(scanResult)}
+                                            className="flex-1 py-2.5 px-4 inline-flex justify-center items-center gap-2 rounded-xl border border-transparent font-bold bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-lg shadow-blue-500/20 hover:shadow-blue-500/40 hover:-translate-y-0.5 active:translate-y-0 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 text-sm transition-all duration-200"
+                                        >
+                                            <FiCheck className="w-4 h-4" /> Save
+                                        </button>
+                                        <button
+                                            onClick={() => handleCopyResult(scanResult)}
+                                            className="py-2.5 px-4 inline-flex justify-center items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 font-medium bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 shadow-sm hover:bg-slate-50 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white focus:outline-none focus:ring-2 focus:ring-slate-200 text-sm transition-all"
+                                            title="Copy"
+                                        >
+                                            <FiCopy className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {/* Main Image */}
                 <div
-                    className="flex-1 flex items-center justify-center p-4 relative overflow-hidden group"
+                    className="flex-1 flex items-center justify-center p-4 relative overflow-hidden group cursor-default"
                     onWheel={handleWheel}
+                    onContextMenu={(e) => e.preventDefault()} // Disable context menu for right-click panning
                 >
                     {/* Item Change Notification Overlay */}
                     {switchNotification && (
@@ -1686,105 +1959,214 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
                             >
                                 {Math.round(zoom * 100)}%
                             </button>
-
                             <div className="w-full h-px bg-white/20 my-1"></div>
-
-
                         </div>
                     </div>
 
                     <div className="w-full h-full flex items-center justify-center relative">
-                        {/* Render ONLY current image */}
+                        {/* Hidden div for library requirement - Must be in layout tree for some internal canvas ops */}
+                        <div id="barcode-scanner-hidden-element" className="fixed top-0 left-0 opacity-0 pointer-events-none w-1 h-1 overflow-hidden"></div>
+
                         {/* Render ONLY current image */}
                         {currentImage ? (
                             <div
                                 className={`relative w-full h-full flex items-center justify-center transition-transform duration-200 ease-out origin-center
-                                    ${isMagicMode ? 'cursor-crosshair' : (zoom > 1 ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : '')}`}
+                                    ${isScanning
+                                        ? (scanTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair')
+                                        : (zoom > 1 ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : '')
+                                    }`}
                                 style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom}) rotate(${currentImage.rotation || 0}deg)` }}
                                 onMouseDown={(e) => {
-                                    if (isMagicMode) handleMagicMouseDown(e);
+                                    if (isScanning) handleScanMouseDown(e, 'drawing');
                                     else handlePanMouseDown(e);
                                 }}
                                 onMouseMove={(e) => {
-                                    if (isPanning) handlePanMouseMove(e);
+                                    if (isPanning) handlePanMouseMove(e); // Prioritize panning
+                                    else if (isScanning) handleScanMouseMove(e);
                                 }}
-                                onMouseUp={handlePanMouseUp}
-                                onMouseLeave={handlePanMouseUp}
+                                onMouseUp={() => {
+                                    if (isPanning) handlePanMouseUp();
+                                    if (isScanning) handleScanMouseUp();
+                                }}
+                                onMouseLeave={() => {
+                                    if (isPanning) handlePanMouseUp();
+                                    if (isScanning) handleScanMouseUp();
+                                }}
+                                onTouchStart={(e) => {
+                                    // Basic touch support for scanning
+                                    if (isScanning) handleScanMouseDown(e, 'drawing');
+                                }}
+                                onTouchMove={(e) => {
+                                    if (isScanning) handleScanMouseMove(e);
+                                }}
+                                onTouchEnd={() => {
+                                    if (isScanning) handleScanMouseUp();
+                                }}
                             >
-
-
-
-
-
                                 <CachedImage
-                                    key={`${currentIndex}-${refreshKey}`}
+                                    key={`${currentIndex}-${refreshKey}-${viewOriginal}`}
                                     file={currentImage}
-                                    proxyUrl={currentImage.proxyUrl ? `${currentImage.proxyUrl}${currentImage.proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : null}
+                                    proxyUrl={
+                                        viewOriginal
+                                            ? (currentImage.localOriginalUrl || currentImage.originalUrl)
+                                            : (currentImage.proxyUrl ? `${currentImage.proxyUrl}${currentImage.proxyUrl.includes('?') ? '&' : '?'}t=${refreshKey}` : null)
+                                    }
                                     originalUrl={currentImage.originalUrl}
                                     usePublic={currentImage.usePublic}
-                                    className="block max-w-full max-h-full object-contain drop-shadow-2xl"
-                                    shouldLoad={true} // UX: Always load in Gallery mode
+                                    className="block max-w-full max-h-full object-contain drop-shadow-2xl pointer-events-none select-none"
+                                    shouldLoad={true}
                                     isLocal={currentImage.isLocal}
                                     imgRef={imageRef}
-                                    optimizeImages={optimizeImages}
+                                    crossOrigin="anonymous"
+                                    optimizeImages={!viewOriginal && optimizeImages}
+                                    onLoad={() => setImageLoaded(true)}
                                 />
 
-                                {/* OVERLAYS inside Rotated Container */}
-                                {scanResults && scanResults.map((code, idx) => {
-                                    if (!code.rect) return null;
-                                    const img = imageRef.current;
-                                    if (!img) return null;
+                                {/* CROP OVERLAY - Positioned to match image exactly, accounting for zoom */}
+                                {(() => {
+                                    console.log("Overlay render check:", { isScanning, imageLoaded, crop, interactionMode, zoom, pan });
 
-                                    // CALCULATE EXACT POSITION (Handling object-fit: contain via offsetLeft/Top)
-                                    // 1. Scale Ratio (Display / Natural)
-                                    const scaleX = img.width / img.naturalWidth;
-                                    const scaleY = img.height / img.naturalHeight;
+                                    // Calculate overlay position to match image
+                                    let overlayStyle = { zIndex: 100, border: '2px solid red' };
 
-                                    // 2. Position: Image Offset in Container + (Natural Coord * Scale)
-                                    // The img.offsetLeft gives the gap caused by 'object-contain' centering.
-                                    // Since this `map` is rendered as a sibling to CachedImage (which fills the parent),
-                                    // relative to the parent, the image starts at img.offsetLeft/Top (assuming CachedImage is 0,0).
-                                    // Note: CachedImage is w-full h-full, so it aligns with parent.
-                                    // `img` is inside CachedImage. offsetLeft is relative to CachedImage (offsetParent).
-                                    // So this works perfectly.
+                                    if (imageRef.current && isScanning) {
+                                        // Since overlay and image are siblings in the same transformed container,
+                                        // we can position the overlay to match the image's natural rendered size
+                                        // The image uses object-contain, so we need to match its actual rendered dimensions
+                                        const img = imageRef.current;
 
-                                    // 2. Position: Image Offset in Container + (Natural Coord * Scale)
-                                    // CENTER POINT for Hotspot
-                                    const centerX = img.offsetLeft + (code.rect.x * scaleX) + ((code.rect.w * scaleX) / 2);
-                                    const centerY = img.offsetTop + (code.rect.y * scaleY) + ((code.rect.w * scaleX) / 2);
-                                    // Note: Using width for height in centerY calc? No, usage of H is cleaner, but let's stick to rect.h
-                                    const centerYFixed = img.offsetTop + (code.rect.y * scaleY) + ((code.rect.h * scaleY) / 2);
+                                        // Get the image's natural aspect ratio
+                                        const naturalAspect = img.naturalWidth / img.naturalHeight;
+                                        const containerAspect = img.parentElement.offsetWidth / img.parentElement.offsetHeight;
 
-                                    const isAI = code.source === 'AI_GEMINI';
-                                    const bgColor = isAI ? 'bg-indigo-600' : 'bg-red-600';
-                                    const shadowColor = isAI ? 'shadow-[0_0_15px_rgba(79,70,229,0.6)]' : 'shadow-sm';
+                                        let imgWidth, imgHeight, imgLeft, imgTop;
 
-                                    return (
+                                        // Calculate actual rendered size with object-contain
+                                        if (naturalAspect > containerAspect) {
+                                            // Image is wider - fits to width
+                                            imgWidth = img.parentElement.offsetWidth;
+                                            imgHeight = imgWidth / naturalAspect;
+                                            imgLeft = 0;
+                                            imgTop = (img.parentElement.offsetHeight - imgHeight) / 2;
+                                        } else {
+                                            // Image is taller - fits to height
+                                            imgHeight = img.parentElement.offsetHeight;
+                                            imgWidth = imgHeight * naturalAspect;
+                                            imgTop = 0;
+                                            imgLeft = (img.parentElement.offsetWidth - imgWidth) / 2;
+                                        }
+
+                                        overlayStyle = {
+                                            ...overlayStyle,
+                                            position: 'absolute',
+                                            left: `${imgLeft}px`,
+                                            top: `${imgTop}px`,
+                                            width: `${imgWidth}px`,
+                                            height: `${imgHeight}px`,
+                                            pointerEvents: 'auto'
+                                        };
+
+                                        console.log("Overlay positioning:", {
+                                            overlayStyle,
+                                            naturalAspect,
+                                            containerAspect,
+                                            imgWidth,
+                                            imgHeight,
+                                            zoom,
+                                            pan
+                                        });
+                                    }
+
+                                    return isScanning && (
                                         <div
-                                            key={idx}
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                navigator.clipboard.writeText(code.data);
-                                                showToast(`Copied: ${code.data}`, "success");
+                                            ref={overlayRef}
+                                            style={overlayStyle}
+                                            onMouseDown={(e) => {
+                                                if (interactionMode === 'none') {
+                                                    handleScanMouseDown(e, 'drawing');
+                                                }
                                             }}
-                                            className={`absolute transform -translate-x-1/2 -translate-y-1/2 cursor-pointer z-50 group/spot flex items-center justify-center`}
-                                            style={{
-                                                left: `${centerX}px`,
-                                                top: `${centerYFixed}px`,
+                                            onMouseMove={handleScanMouseMove}
+                                            onMouseUp={handleScanMouseUp}
+                                            onMouseLeave={handleScanMouseUp}
+                                            onTouchStart={(e) => {
+                                                if (interactionMode === 'none') {
+                                                    handleScanMouseDown(e, 'drawing');
+                                                }
                                             }}
+                                            onTouchMove={handleScanMouseMove}
+                                            onTouchEnd={handleScanMouseUp}
                                         >
-                                            {/* Hotspot Dot (Pulsing) */}
-                                            <div className={`relative flex items-center justify-center`}>
-                                                <div className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${bgColor}`}></div>
-                                                <div className={`relative inline-flex rounded-full px-3 py-1 text-xs font-bold text-white ${bgColor} ${shadowColor} border border-white/20 transition-transform hover:scale-110 items-center gap-1.5`}>
-                                                    {isAI && <span className="text-[10px]">Ô£¿</span>}
-                                                    <span className="max-w-[150px] truncate">{code.data}</span>
-                                                    <FiCopy className="opacity-0 group-hover/spot:opacity-100 transition-opacity w-3 h-3 ml-1" />
+                                            {console.log("Rendering scan overlay!")}
+                                            {/* Guide Lines (Crosshairs) - Show only when drawing or interacting */}
+                                            {(interactionMode === 'drawing' || interactionMode === 'moving' || interactionMode === 'resizing') && (
+                                                <div className="absolute inset-0 pointer-events-none">
+                                                    {/* Horizontal center line */}
+                                                    <div className="absolute left-0 right-0 h-px bg-teal-400/40" style={{ top: '50%' }} />
+                                                    {/* Vertical center line */}
+                                                    <div className="absolute top-0 bottom-0 w-px bg-teal-400/40" style={{ left: '50%' }} />
+                                                    {/* Third lines */}
+                                                    <div className="absolute left-0 right-0 h-px bg-teal-400/25" style={{ top: '33.33%' }} />
+                                                    <div className="absolute left-0 right-0 h-px bg-teal-400/25" style={{ top: '66.66%' }} />
+                                                    <div className="absolute top-0 bottom-0 w-px bg-teal-400/25" style={{ left: '33.33%' }} />
+                                                    <div className="absolute top-0 bottom-0 w-px bg-teal-400/25" style={{ left: '66.66%' }} />
                                                 </div>
-                                            </div>
+                                            )}
+
+                                            {/* Crop Box - Show if width/height > 0 */}
+                                            {crop.width > 0 && crop.height > 0 && (
+                                                <div
+                                                    className={`absolute border-2 pointer-events-auto cursor-move flex items-center justify-center group touch-none transition-shadow ${interactionMode !== 'none' ? 'border-teal-400 shadow-[0_0_15px_rgba(45,212,191,0.4)]' : 'border-teal-500/70 shadow-sm'}`}
+                                                    style={{
+                                                        left: `${crop.x}%`,
+                                                        top: `${crop.y}%`,
+                                                        width: `${crop.width}%`,
+                                                        height: `${crop.height}%`,
+                                                        backgroundColor: 'rgba(45, 212, 191, 0.05)',
+                                                        boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+                                                    }}
+                                                    onMouseDown={(e) => handleScanMouseDown(e, 'moving')}
+                                                    onTouchStart={(e) => handleScanMouseDown(e, 'moving')}
+                                                >
+                                                    {/* Corner Handles - invisible but interactable (scaled inversely to zoom) */}
+                                                    <div className="absolute -top-1.5 -left-1.5 w-4 h-4 rounded-full cursor-nw-resize z-10 opacity-0" style={{ transform: `scale(${1 / zoom})` }} onMouseDown={(e) => handleScanMouseDown(e, 'resizing', 'nw')} />
+                                                    <div className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full cursor-ne-resize z-10 opacity-0" style={{ transform: `scale(${1 / zoom})` }} onMouseDown={(e) => handleScanMouseDown(e, 'resizing', 'ne')} />
+                                                    <div className="absolute -bottom-1.5 -left-1.5 w-4 h-4 rounded-full cursor-sw-resize z-10 opacity-0" style={{ transform: `scale(${1 / zoom})` }} onMouseDown={(e) => handleScanMouseDown(e, 'resizing', 'sw')} />
+                                                    <div className="absolute -bottom-1.5 -right-1.5 w-4 h-4 rounded-full cursor-se-resize z-10 opacity-0" style={{ transform: `scale(${1 / zoom})` }} onMouseDown={(e) => handleScanMouseDown(e, 'resizing', 'se')} />
+
+                                                    {/* Scan Indicator (Subtle) */}
+                                                    {interactionMode === 'none' && !scanResult && (
+                                                        <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-20">
+                                                            <div className="w-full h-px bg-teal-400 shadow-[0_0_8px_#2dd4bf] animate-[scanner-pan_3s_infinite_linear]"></div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Move Icon (top-right, with indicator) */}
+                                                    <div className="absolute -top-7 -right-2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity flex items-center gap-1">
+                                                        <span className="text-xs text-white bg-black/60 px-2 py-0.5 rounded whitespace-nowrap">Drag to Move</span>
+                                                        <div className="bg-teal-500 rounded p-1 shadow-lg">
+                                                            <FiMove className="w-3 h-3 text-white" />
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Dimensions Label */}
+                                                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-teal-500 text-white text-xs px-2 py-1 rounded shadow-lg whitespace-nowrap pointer-events-none">
+                                                        {Math.round(crop.width)}% × {Math.round(crop.height)}%
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Instruction Text (when no crop box drawn) */}
+                                            {(!crop.width || !crop.height || crop.width === 0 || crop.height === 0) && (
+                                                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/70 text-white px-6 py-4 rounded-lg text-center pointer-events-none">
+                                                    <FiCrop className="w-8 h-8 mx-auto mb-2 text-teal-400" />
+                                                    <p className="font-medium">Click and drag to select scan area</p>
+                                                    <p className="text-sm text-gray-300 mt-1">Draw a rectangle around the barcode or text</p>
+                                                </div>
+                                            )}
                                         </div>
                                     );
-                                })}
+                                })()}
                             </div>
                         ) : (
                             <div className="text-gray-500 flex flex-col items-center">
@@ -1809,156 +2191,7 @@ const ImageGalleryModal = ({ item, onClose, showImages, optimizeImages, columnsM
 
                 {/* Item Name Transition Toast REMOVED */}
 
-                {/* Magic Overlay - VISUALIZATION ONLY */}
-                {
-                    isMagicMode && (
-                        <div className="absolute inset-0 z-50 pointer-events-none flex items-center justify-center p-4">
-                            {/* Visual Guide Text */}
-                            {!isDragging && (
-                                <div className="absolute top-24 left-1/2 -translate-x-1/2 bg-black/70 text-white px-4 py-2 rounded-full text-sm font-medium backdrop-blur-md pointer-events-none animate-fadeIn select-none">
-                                    Click and drag to select area
-                                </div>
-                            )}
 
-                            {/* Exit Button inside Overlay for better UX */}
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    setIsMagicMode(false);
-                                    setDragStart(null);
-                                    setDragEnd(null);
-                                }}
-                                className="absolute top-24 right-4 bg-white text-gray-900 px-4 py-2 rounded-lg shadow-lg font-medium flex items-center gap-2 hover:bg-gray-100 transition-colors pointer-events-auto z-[70]"
-                            >
-                                <FiX className="w-4 h-4" />
-                                Exit Extraction
-                            </button>
-
-                            <svg className="absolute inset-0 w-full h-full pointer-events-none">
-                                {imageRef.current && dragStart && dragEnd && (() => {
-                                    const rect = imageRef.current.getBoundingClientRect();
-                                    const r = getRect(dragStart, dragEnd);
-
-                                    // Add offset to make relative to screen
-                                    const screenX = r.x + rect.left;
-                                    const screenY = r.y + rect.top;
-
-                                    return (
-                                        <rect
-                                            x={screenX}
-                                            y={screenY}
-                                            width={r.width}
-                                            height={r.height}
-                                            fill="rgba(99, 102, 241, 0.2)"
-                                            stroke="#6366f1"
-                                            strokeWidth="2"
-                                            strokeDasharray="4 2"
-                                        />
-                                    );
-                                })()}
-                            </svg>
-
-                        </div>
-                    )
-                }
-
-                {/* Global Loading Overlay (Visible during Auto-Scan too) */}
-                {
-                    isExtracting && (
-                        <div className="absolute inset-0 z-[80] bg-black/50 flex items-center justify-center backdrop-blur-sm">
-                            <div className="flex flex-col items-center">
-                                <FiLoader className="w-10 h-10 text-indigo-400 animate-spin mb-4" />
-                                <span className="text-white font-medium text-lg">Scanning Image...</span>
-                            </div>
-                        </div>
-                    )
-                }
-
-
-                {/* Extraction Result Modal */}
-                {
-                    extractionResult && (
-                        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fadeIn">
-                            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden">
-                                <div className="p-4 border-b flex justify-between items-center bg-gray-50">
-                                    <h3 className="font-semibold text-lg text-gray-800 flex items-center gap-2">
-                                        <FiZap className="text-indigo-600" />
-                                        Extraction Result
-                                    </h3>
-                                    <button onClick={() => { setExtractionResult(null); setIsMagicMode(false); }} className="p-2 hover:bg-gray-200 rounded-full transition-colors">
-                                        <FiX className="w-5 h-5 text-gray-500" />
-                                    </button>
-                                </div>
-                                <div className="p-6 overflow-y-auto space-y-6">
-                                    {extractionResult.error ? (
-                                        <div className="p-4 bg-red-50 text-red-600 rounded-lg flex items-center gap-3">
-                                            <FiAlertCircle className="w-6 h-6 flex-shrink-0" />
-                                            {extractionResult.error}
-                                        </div>
-                                    ) : (
-                                        <>
-                                            {/* Text Section */}
-                                            <div>
-                                                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Extracted Text</label>
-                                                <div className="relative group">
-                                                    <textarea
-                                                        readOnly
-                                                        className="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm font-mono text-gray-700 min-h-[100px] resize-y focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                                                        value={extractionResult.text || "No text found."}
-                                                    />
-                                                    {extractionResult.text && (
-                                                        <button
-                                                            onClick={() => navigator.clipboard.writeText(extractionResult.text)}
-                                                            className="absolute top-2 right-2 p-2 bg-white shadow-sm border rounded hover:bg-gray-50 text-gray-500 hover:text-indigo-600 transition-colors"
-                                                            title="Copy Text"
-                                                        >
-                                                            <FiCopy className="w-4 h-4" />
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            </div>
-
-                                            {/* Codes Section */}
-                                            {extractionResult.codes && extractionResult.codes.length > 0 && (
-                                                <div>
-                                                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">QR / Barcodes</label>
-                                                    <div className="space-y-3">
-                                                        {extractionResult.codes.map((code, idx) => (
-                                                            <div key={idx} className="flex items-center justify-between p-3 bg-indigo-50 border border-indigo-100 rounded-lg">
-                                                                <div>
-                                                                    <span className="text-xs font-bold text-indigo-500 bg-indigo-100 px-2 py-0.5 rounded">{code.type}</span>
-                                                                    <p className="mt-1 text-sm font-medium text-gray-800 break-all">{code.data}</p>
-                                                                </div>
-                                                                <button
-                                                                    onClick={() => navigator.clipboard.writeText(code.data)}
-                                                                    className="p-2 hover:bg-white rounded-full text-indigo-400 hover:text-indigo-600 transition-colors"
-                                                                    title="Copy Code"
-                                                                >
-                                                                    <FiCopy className="w-4 h-4" />
-                                                                </button>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {!extractionResult.text && (!extractionResult.codes || extractionResult.codes.length === 0) && (
-                                                <div className="text-center text-gray-400 py-8">
-                                                    No data found in selected region.
-                                                </div>
-                                            )}
-                                        </>
-                                    )}
-                                </div>
-                                <div className="p-4 bg-gray-50 border-t flex justify-end">
-                                    <button onClick={() => { setExtractionResult(null); setIsMagicMode(false); }} className="px-6 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 transition-colors font-medium">
-                                        Done
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )
-                }
 
                 {/* Thumbnails moved before Right Panel */}
                 <div className="h-24 bg-black/80 flex items-center gap-2 overflow-x-auto p-2 px-4 justify-center border-t border-white/10 shrink-0 z-40">
@@ -2533,7 +2766,15 @@ const MondayAppView = () => {
     const toast = useToast();
 
     const [viewMode, setViewMode] = useState(() => localStorage.getItem('monday_viewMode') || 'grid');
+
     const [loading, setLoading] = useState(true);
+    const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => localStorage.getItem('monday_sidebarCollapsed') === 'true');
+    // Edit Mode State
+    const [isEditMode, setIsEditMode] = useState(false);
+    const [modifiedItems, setModifiedItems] = useState({}); // {itemId: {colId: value } }
+    const [isSaving, setIsSaving] = useState(false);
+    // const [showJobHistory, setShowJobHistory] = useState(false); // Already declared below? No, it was missing.
+
 
     // Search & Filter State (Moved to top to prevent ReferenceError)
     const [searchTerm, setSearchTerm] = useState('');
@@ -2650,7 +2891,7 @@ const MondayAppView = () => {
             // Otherwise, open/update it
             const imgIdx = searchParams.get('image');
             const initialIndex = imgIdx ? parseInt(imgIdx, 10) : 0;
-            setGalleryItem({ ...selectedItem, initialIndex });
+            setGalleryItem({ ...selectedItem, board_id: activeBoardId, initialIndex });
             lastSyncedId.current = currentId;
         } else {
             // URL cleared (e.g. Back button or explicit clear).
@@ -2658,17 +2899,13 @@ const MondayAppView = () => {
             if (galleryItem) setGalleryItem(null);
             lastSyncedId.current = null;
         }
-    }, [selectedItem, galleryItem, searchParams]);
+    }, [selectedItem, galleryItem, searchParams, activeBoardId]);
 
     // Navigation Logic
     const filteredItems = useMemo(() => {
         // If no active filters (or all empty), return all
         let filtered = boardItems;
 
-        // 1. Filtering
-        // Include has_image in active filters even if value is empty
-        // 1. Filtering
-        // Include has_image in active filters even if value is empty
         // 1. Filtering
         // Include has_image in active filters even if value is empty
         const activeFilters = filters.filter(f => f.condition === 'is_duplicate' || f.condition === 'is_not_empty' || f.condition === 'is_empty' || f.column === 'has_image' || f.value.trim());
@@ -2879,12 +3116,6 @@ const MondayAppView = () => {
     // State definitions moved to top
 
     // Sync Menu State
-    const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => localStorage.getItem('monday_sidebarCollapsed') === 'true');
-
-    // Edit Mode State
-    const [isEditMode, setIsEditMode] = useState(false);
-    const [modifiedItems, setModifiedItems] = useState({}); // {itemId: {colId: value } }
-    const [isSaving, setIsSaving] = useState(false);
 
     // Persistence Effects
     useEffect(() => {
@@ -3125,9 +3356,15 @@ const MondayAppView = () => {
             // Update All States
             setBoardItems(prev => prev.map(item => String(item.id) === String(itemId) ? getUpdatedItem(item) : item));
             setGalleryItem(prev => (prev && String(prev.id) === String(itemId)) ? getUpdatedItem(prev) : prev);
-            setSelectedItem(prev => (prev && String(prev.id) === String(itemId)) ? getUpdatedItem(prev) : prev);
 
-            toast.success("Item Updated");
+            // Better Success Message
+            const changedColIds = Object.keys(changes);
+            if (changedColIds.length === 1 && changedColIds[0] !== 'name') {
+                const colTitle = columnsMap?.[changedColIds[0]]?.title || changedColIds[0];
+                toast.success(`Saved to "${colTitle}"`);
+            } else {
+                toast.success("Item Updated");
+            }
             return true;
 
         } catch (e) {
@@ -4293,6 +4530,7 @@ const MondayAppView = () => {
                         onRotationComplete={() => setRefreshKey(prev => prev + 1)}
                         enterpriseSync={enterpriseSync}
                         keepOriginals={keepOriginals}
+
                     />
                 )
             }
@@ -4371,6 +4609,8 @@ const MondayAppView = () => {
                 isOpen={showJobHistory}
                 onClose={() => setShowJobHistory(false)}
             />
+
+
         </div >
     );
 };

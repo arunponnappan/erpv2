@@ -84,7 +84,9 @@ async def download_file(file_path: str) -> Any:
         raise HTTPException(status_code=404, detail="Not a file")
 
     debug_log("Serving File...")
-    return FileResponse(target_path)
+    response = FileResponse(target_path)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 @router.post("/rotate")
 async def rotate_image(payload: dict) -> Any:

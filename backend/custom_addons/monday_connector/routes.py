@@ -28,6 +28,11 @@ class BarcodeConfigDTO(BaseModel):
     display_column_ids: List[str]
     is_mobile_active: bool = True
 
+class ClearCacheRequest(BaseModel):
+    clear_db: bool = False
+    clear_assets: bool = False
+    clear_optimized: bool = False
+
 def get_monday_service(
     session: Session = Depends(get_session),
     current_user: User = Depends(deps.get_current_user)
@@ -379,6 +384,40 @@ async def get_board_items(
             "cursor": None # No cursor for local DB yet
         }
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/boards/{board_id}/clear-cache")
+async def clear_board_cache(
+    board_id: int,
+    request: ClearCacheRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.get_current_user),
+    service: MondayService = Depends(get_monday_service)
+):
+    result = await service.clear_board_cache(
+        session, 
+        board_id, 
+        clear_db=request.clear_db, 
+        clear_assets=request.clear_assets, 
+        clear_optimized=request.clear_optimized
+    )
+    return result
+
+@router.get("/boards/{board_id}/columns")
+async def get_board_columns(
+    board_id: int,
+    session: Session = Depends(get_session),
+    service: MondayService = Depends(get_monday_service)
+) -> Any:
+    """
+    Get column configuration for a board.
+    Returns columns with their IDs, titles, types, and editable status.
+    """
+    try:
+        columns = await service.get_board_columns(session, board_id)
+        return {"columns": columns}
+    except Exception as e:
+        print(f"Error fetching board columns: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.patch("/items/{item_id}/assets/{asset_id}")
@@ -1215,70 +1254,7 @@ async def clear_barcode_config(
 
 
 
-@router.post("/items/{item_id}/barcode")
-async def update_item_barcode(
-    item_id: int,
-    payload: Dict[str, str], # {"barcode": "12345"}
-    session: Session = Depends(get_session),
-    service: MondayService = Depends(get_monday_service),
-    current_user: User = Depends(deps.get_current_user)
-):
-    """
-    Update the barcode column for a specific item.
-    Requires existing config for the item's board.
-    """
-    barcode = payload.get("barcode")
-    if not barcode:
-        raise HTTPException(status_code=400, detail="Barcode value is required")
 
-    # 1. Find Item to get Board ID
-    item = session.exec(select(MondayItem).where(MondayItem.id == item_id)).first()
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
-
-    # 2. Get Config for this Board
-    config = session.exec(select(MondayBarcodeConfig).where(MondayBarcodeConfig.board_id == item.board_id)).first()
-    if not config:
-        raise HTTPException(status_code=400, detail="Barcode configuration not found for this board")
-
-    # 3. Update using MondayService (uses existing update_item_column_value logic)
-    # Construct column_values dict
-    column_values = {
-        config.barcode_column_id: barcode
-    }
-
-    # Use the existing update endpoint logic by calling service directly
-    # Reuse `update_item_value` logic? Better to call service.
-    
-    # 4. Update on Monday.com
-    try:
-        updated = await service.update_item_column_value(item.board_id, item_id, column_values)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update Monday.com: {str(e)}")
-
-    # 5. Update Local DB (Optimistic)
-    if updated:
-         new_values = item.column_values.copy() if item.column_values else {}
-         if not isinstance(new_values, list): new_values = []
-         
-         # Helper to update list of dicts
-         found = False
-         for cv in new_values:
-             if cv.get("id") == config.barcode_column_id:
-                 cv["text"] = str(barcode)
-                 cv["value"] = str(barcode)
-                 found = True
-                 break
-        
-         if not found:
-             new_values.append({"id": config.barcode_column_id, "text": str(barcode), "value": str(barcode), "type": "text"})
-         
-         item.column_values = new_values
-         session.add(item)
-         session.commit()
-         session.refresh(item)
-         
-    return {"status": "success", "message": "Barcode updated", "item_id": item_id, "barcode": barcode}
 
 
 

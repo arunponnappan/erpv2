@@ -514,3 +514,48 @@ class MondayService:
         except Exception as e:
             print(f"Failed to update item {item_id}: {e}")
             raise e
+
+    async def get_board_columns(self, session: Session, board_id: int) -> List[Dict[str, Any]]:
+        """
+        Fetches board column configuration from local DB (cached) or Monday.com API.
+        Returns list of columns with id, title, type, and settings.
+        """
+        # Try to get from local DB first (cached during sync)
+        db_board = session.exec(select(MondayBoard).where(MondayBoard.id == board_id)).first()
+        
+        if db_board and db_board.columns:
+            # Return cached columns as list
+            return list(db_board.columns.values())
+        
+        # If not cached, fetch from Monday.com
+        query = f"""
+        {{
+            boards (ids: [{board_id}]) {{
+                columns {{
+                    id
+                    title
+                    type
+                    settings_str
+                }}
+            }}
+        }}
+        """
+        
+        try:
+            data = await self.execute_query(query)
+            boards = data.get("data", {}).get("boards", [])
+            if boards and boards[0].get("columns"):
+                columns = boards[0]["columns"]
+                
+                # Cache it for next time
+                if db_board:
+                    columns_map = {col["id"]: col for col in columns}
+                    db_board.columns = columns_map
+                    session.add(db_board)
+                    session.commit()
+                
+                return columns
+        except Exception as e:
+            print(f"Error fetching board columns: {e}")
+        
+        return []
