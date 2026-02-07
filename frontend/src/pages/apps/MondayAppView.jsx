@@ -2661,65 +2661,185 @@ const MondayAppView = () => {
     }, [selectedItem, galleryItem, searchParams]);
 
     // Navigation Logic
-    const filteredItemsList = useMemo(() => {
-        // Reuse the same logic used for rendering the grid/list to determine navigation context
-        // Ensure this matches the variables used in the render function
-        // Actually, 'boardItems' is the source, and 'searchTerm' / 'activeFilters' are applied.
-        // We need to replicate the filter logic or lift it to a memo.
+    const filteredItems = useMemo(() => {
+        // If no active filters (or all empty), return all
+        let filtered = boardItems;
 
-        let processed = [...boardItems];
+        // 1. Filtering
+        // Include has_image in active filters even if value is empty
+        // 1. Filtering
+        // Include has_image in active filters even if value is empty
+        // 1. Filtering
+        // Include has_image in active filters even if value is empty
+        const activeFilters = filters.filter(f => f.condition === 'is_duplicate' || f.condition === 'is_not_empty' || f.condition === 'is_empty' || f.column === 'has_image' || f.value.trim());
 
-        // 1. Text Search
-        if (searchTerm) {
-            const lower = searchTerm.toLowerCase();
-            processed = processed.filter(item => {
-                if (item.name.toLowerCase().includes(lower)) return true;
-                return item.column_values.some(c => c.text && String(c.text).toLowerCase().includes(lower));
+        // Pre-calculate duplicates if needed
+        let duplicateSets = {}; // Map of columnId -> Set of duplicate values
+
+        const duplicateFilters = activeFilters.filter(f => f.condition === 'is_duplicate');
+        if (duplicateFilters.length > 0) {
+            duplicateFilters.forEach(filter => {
+                const counts = {};
+                boardItems.forEach(item => {
+                    let text = '';
+                    if (filter.column === 'name') {
+                        text = item.name;
+                    } else if (filter.column !== 'all') {
+                        const col = item.column_values.find(c => c.id === filter.column);
+                        text = col?.text || '';
+                    }
+
+                    if (text) {
+                        const key = text.trim().toLowerCase();
+                        counts[key] = (counts[key] || 0) + 1;
+                    }
+                });
+
+                // create set of values that appear > 1
+                duplicateSets[filter.column] = new Set(
+                    Object.entries(counts)
+                        .filter(([k, v]) => v > 1)
+                        .map(([k, v]) => k)
+                );
             });
         }
 
-        // 2. Advanced Filters
         if (activeFilters.length > 0) {
-            processed = processed.filter(item => {
+            filtered = boardItems.filter(item => {
+                // Check ALL filters (AND logic)
                 return activeFilters.every(filter => {
-                    const colId = filter.column;
-                    const val = filter.value?.toLowerCase();
-                    if (!val) return true;
-
-                    if (colId === 'all') {
-                        if (item.name.toLowerCase().includes(val)) return true;
-                        return item.column_values.some(c => c.text && String(c.text).toLowerCase().includes(val));
+                    if (filter.condition === 'is_duplicate') {
+                        // Check if item's value for this column is in the duplicate set
+                        let text = '';
+                        if (filter.column === 'name') {
+                            text = item.name;
+                        } else if (filter.column !== 'all') {
+                            const col = item.column_values.find(c => c.id === filter.column);
+                            text = col?.text || '';
+                        }
+                        return duplicateSets[filter.column]?.has(text.trim().toLowerCase());
                     }
 
-                    if (colId === 'name') {
-                        return item.name.toLowerCase().includes(val);
+                    if (filter.column === 'has_image') {
+                        const images = getItemImages(item);
+                        return images.length > 0;
                     }
 
-                    const colVal = item.column_values.find(c => c.id === colId);
-                    return colVal && colVal.text && String(colVal.text).toLowerCase().includes(val);
+                    // Special Case: Is Not Empty
+                    if (filter.condition === 'is_not_empty') {
+                        const checkNotEmpty = (text) => text && text.trim().length > 0;
+                        if (filter.column === 'name') return checkNotEmpty(item.name);
+                        if (filter.column !== 'all') {
+                            const col = item.column_values.find(c => c.id === filter.column);
+                            return checkNotEmpty(col?.text);
+                        }
+                        return true; // "All" not empty doesn't make sense, pass.
+                    }
+
+                    // Special Case: Is Empty
+                    if (filter.condition === 'is_empty') {
+                        const checkEmpty = (text) => !text || text.trim().length === 0;
+                        if (filter.column === 'name') return checkEmpty(item.name);
+                        if (filter.column !== 'all') {
+                            const col = item.column_values.find(c => c.id === filter.column);
+                            return checkEmpty(col?.text);
+                        }
+                        return false;
+                    }
+
+                    const searchTerms = filter.value.toLowerCase().split(',').map(t => t.trim()).filter(Boolean);
+                    if (!searchTerms.length) return true;
+
+                    const checkMatch = (text) => {
+                        if (!text) return false;
+                        const lowerText = text.toLowerCase();
+
+                        if (filter.condition === 'equals') {
+                            return lowerText === searchTerms[0]; // Strict equal to first term
+                        }
+                        if (filter.condition === 'does_not_contain') {
+                            return !searchTerms.some(term => lowerText.includes(term));
+                        }
+                        if (filter.condition === 'does_not_equal') {
+                            return lowerText !== searchTerms[0];
+                        }
+                        // Default: Contains
+                        // Match if partial text exists in field (OR logic for terms)
+                        return searchTerms.some(term => lowerText.includes(term));
+                    };
+
+                    // Search by Name
+                    if (filter.column === 'name') {
+                        return checkMatch(item.name);
+                    }
+
+                    // Search specific column
+                    if (filter.column !== 'all') {
+                        const col = item.column_values.find(c => c.id === filter.column);
+                        return checkMatch(col?.text);
+                    }
+
+                    // Search All (Name + Any Column)
+                    if (checkMatch(item.name)) return true;
+                    return item.column_values.some(c => checkMatch(c.text));
                 });
             });
+
         }
 
-        return processed;
-    }, [boardItems, searchTerm, activeFilters]);
+        // 2. Sorting
+        // Create a shallow copy to safely sort without mutating state
+        const sorted = [...filtered].sort((a, b) => {
+            let aVal = '';
+            let bVal = '';
+
+            if (sortConfig.key === 'name') {
+                aVal = a.name || '';
+                bVal = b.name || '';
+            } else {
+                // Find column value
+                const aCol = a.column_values.find(c => c.id === sortConfig.key);
+                const bCol = b.column_values.find(c => c.id === sortConfig.key);
+                aVal = aCol?.text || '';
+                bVal = bCol?.text || '';
+            }
+
+            // Numeric check (simple implementation)
+            const aNum = parseFloat(aVal);
+            const bNum = parseFloat(bVal);
+            // Check if string is just a number
+            const isNumeric = !isNaN(aNum) && !isNaN(bNum) && String(aVal).trim() !== '' && String(bVal).trim() !== '' && !isNaN(Number(aVal)) && !isNaN(Number(bVal));
+
+            let comparison = 0;
+            if (isNumeric) {
+                comparison = aNum - bNum;
+            } else {
+                comparison = String(aVal).toLowerCase().localeCompare(String(bVal).toLowerCase());
+            }
+
+            return sortConfig.direction === 'asc' ? comparison : -comparison;
+        });
+
+        return sorted;
+
+    }, [boardItems, filters, sortConfig]);
 
     const handleNextItem = () => {
-        if (!selectedItem || !filteredItemsList.length) return;
-        const idx = filteredItemsList.findIndex(i => String(i.id) === String(selectedItem.id));
+        if (!selectedItem || !filteredItems.length) return;
+        const idx = filteredItems.findIndex(i => String(i.id) === String(selectedItem.id));
         if (idx === -1) return; // Item not in current filtered list?
 
-        const nextIdx = (idx + 1) % filteredItemsList.length;
-        setSelectedItem(filteredItemsList[nextIdx], null); // Reset image index
+        const nextIdx = (idx + 1) % filteredItems.length;
+        setSelectedItem(filteredItems[nextIdx], null); // Reset image index
     };
 
     const handlePrevItem = () => {
-        if (!selectedItem || !filteredItemsList.length) return;
-        const idx = filteredItemsList.findIndex(i => String(i.id) === String(selectedItem.id));
+        if (!selectedItem || !filteredItems.length) return;
+        const idx = filteredItems.findIndex(i => String(i.id) === String(selectedItem.id));
         if (idx === -1) return;
 
-        const prevIdx = (idx - 1 + filteredItemsList.length) % filteredItemsList.length;
-        const prevItem = filteredItemsList[prevIdx];
+        const prevIdx = (idx - 1 + filteredItems.length) % filteredItems.length;
+        const prevItem = filteredItems[prevIdx];
 
         // Smart Prev: Start at the LAST image of the previous item for natural flow
         const prevImages = getItemImages(prevItem, optimizeImages);
@@ -2741,7 +2861,7 @@ const MondayAppView = () => {
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [selectedItem, filteredItemsList]); // Re-bind when item/list changes
+    }, [selectedItem, filteredItems]); // Re-bind when item/list changes
 
     const galleryItemRef = useRef(galleryItem); // Ref to access state inside event listener
     const [showExitDialog, setShowExitDialog] = useState(false);
@@ -3048,138 +3168,7 @@ const MondayAppView = () => {
 
 
 
-    const filteredItems = useMemo(() => {
-        // If no active filters (or all empty), return all
-        let filtered = boardItems;
-
-        // 1. Filtering
-        // Include has_image in active filters even if value is empty
-        const activeFilters = filters.filter(f => f.condition === 'is_duplicate' || f.column === 'has_image' || f.value.trim());
-
-        // Pre-calculate duplicates if needed
-
-
-        let duplicateSets = {}; // Map of columnId -> Set of duplicate values
-
-        const duplicateFilters = activeFilters.filter(f => f.condition === 'is_duplicate');
-        if (duplicateFilters.length > 0) {
-            duplicateFilters.forEach(filter => {
-                const counts = {};
-                boardItems.forEach(item => {
-                    let text = '';
-                    if (filter.column === 'name') {
-                        text = item.name;
-                    } else if (filter.column !== 'all') {
-                        const col = item.column_values.find(c => c.id === filter.column);
-                        text = col?.text || '';
-                    }
-
-                    if (text) {
-                        const key = text.trim().toLowerCase();
-                        counts[key] = (counts[key] || 0) + 1;
-                    }
-                });
-
-                // create set of values that appear > 1
-                duplicateSets[filter.column] = new Set(
-                    Object.entries(counts)
-                        .filter(([k, v]) => v > 1)
-                        .map(([k, v]) => k)
-                );
-            });
-        }
-
-        if (activeFilters.length > 0) {
-            filtered = boardItems.filter(item => {
-                // Check ALL filters (AND logic)
-                return activeFilters.every(filter => {
-                    if (filter.condition === 'is_duplicate') {
-                        // Check if item's value for this column is in the duplicate set
-                        let text = '';
-                        if (filter.column === 'name') {
-                            text = item.name;
-                        } else if (filter.column !== 'all') {
-                            const col = item.column_values.find(c => c.id === filter.column);
-                            text = col?.text || '';
-                        }
-                        return duplicateSets[filter.column]?.has(text.trim().toLowerCase());
-                    }
-
-                    if (filter.column === 'has_image') {
-                        const images = getItemImages(item);
-                        return images.length > 0;
-                    }
-
-                    const searchTerms = filter.value.toLowerCase().split(',').map(t => t.trim()).filter(Boolean);
-                    if (!searchTerms.length) return true;
-
-                    const checkMatch = (text) => {
-                        if (!text) return false;
-                        const lowerText = text.toLowerCase();
-
-                        if (filter.condition === 'equals') {
-                            return lowerText === searchTerms[0]; // Strict equal to first term
-                        }
-                        // Default: Contains
-                        // Match if partial text exists in field (OR logic for terms)
-                        return searchTerms.some(term => lowerText.includes(term));
-                    };
-
-                    // Search by Name
-                    if (filter.column === 'name') {
-                        return checkMatch(item.name);
-                    }
-
-                    // Search specific column
-                    if (filter.column !== 'all') {
-                        const col = item.column_values.find(c => c.id === filter.column);
-                        return checkMatch(col?.text);
-                    }
-
-                    // Search All (Name + Any Column)
-                    if (checkMatch(item.name)) return true;
-                    return item.column_values.some(c => checkMatch(c.text));
-                });
-            });
-
-        }
-
-        // 2. Sorting
-        // Create a shallow copy to safely sort without mutating state
-        const sorted = [...filtered].sort((a, b) => {
-            let aVal = '';
-            let bVal = '';
-
-            if (sortConfig.key === 'name') {
-                aVal = a.name || '';
-                bVal = b.name || '';
-            } else {
-                // Find column value
-                const aCol = a.column_values.find(c => c.id === sortConfig.key);
-                const bCol = b.column_values.find(c => c.id === sortConfig.key);
-                aVal = aCol?.text || '';
-                bVal = bCol?.text || '';
-            }
-
-            // Numeric check (simple implementation)
-            const aNum = parseFloat(aVal);
-            const bNum = parseFloat(bVal);
-            // Check if string is just a number
-            const isNumeric = !isNaN(aNum) && !isNaN(bNum) && String(aVal).trim() !== '' && String(bVal).trim() !== '' && !isNaN(Number(aVal)) && !isNaN(Number(bVal));
-
-            let comparison = 0;
-            if (isNumeric) {
-                comparison = aNum - bNum;
-            } else {
-                comparison = String(aVal).toLowerCase().localeCompare(String(bVal).toLowerCase());
-            }
-
-            return sortConfig.direction === 'asc' ? comparison : -comparison;
-        });
-
-        return sorted;
-
-    }, [boardItems, filters, sortConfig]);
+    // FilteredItems definition moved to top (lines 2664+)
 
     // Debug: Log filtering results if significant mismatch
     useEffect(() => {
@@ -4030,10 +4019,14 @@ const MondayAppView = () => {
                                             >
                                                 <option value="contains">Contains</option>
                                                 <option value="equals">Equals</option>
+                                                <option value="does_not_contain">Does not contain</option>
+                                                <option value="does_not_equal">Does not equal</option>
                                                 <option value="is_duplicate">Is Duplicate</option>
+                                                <option value="is_not_empty">Is Not Empty</option>
+                                                <option value="is_empty">Is Empty</option>
                                             </select>
                                         </div>
-                                        {filter.condition !== 'is_duplicate' ? (
+                                        {(filter.condition !== 'is_duplicate' && filter.condition !== 'is_not_empty' && filter.condition !== 'is_empty') ? (
                                             <div className="flex-1 min-w-[200px]">
                                                 <div className="relative">
                                                     <TagInput
@@ -4294,8 +4287,8 @@ const MondayAppView = () => {
                         editableColumns={editableColumns}
                         onNext={handleNextItem}
                         onPrev={handlePrevItem}
-                        hasNext={filteredItemsList.length > 1}
-                        hasPrev={filteredItemsList.length > 1}
+                        hasNext={filteredItems.length > 1}
+                        hasPrev={filteredItems.length > 1}
                         refreshKey={refreshKey}
                         onRotationComplete={() => setRefreshKey(prev => prev + 1)}
                         enterpriseSync={enterpriseSync}

@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, TextInput, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, TextInput, Dimensions, Image, ScrollView } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as SecureStore from 'expo-secure-store';
-import { Search, LogOut, CheckCircle, RefreshCw, Filter, Database, CloudOff, CloudUpload, PieChart as ChartPie } from 'lucide-react-native';
+import { Search, LogOut, CheckCircle, RefreshCw, Filter, Database, CloudOff, CloudUpload, PieChart as ChartPie, Image as ImageIcon } from 'lucide-react-native';
 import api from '../services/api';
 import { initDB, saveItems, getItems, updateItemLocal, getUnsyncedItems, markAsSynced } from '../services/db';
 import FilterModal from '../components/FilterModal';
@@ -23,6 +23,7 @@ const MainScannerScreen = ({ onLogout }) => {
     const [selectedItem, setSelectedItem] = useState(null);
     const [searchText, setSearchText] = useState('');
     const [availableColumns, setAvailableColumns] = useState([]);
+    const [baseUrl, setBaseUrl] = useState(null); // Explicit Base URL State
 
     // Filter State
     const [filterModalVisible, setFilterModalVisible] = useState(false);
@@ -44,6 +45,24 @@ const MainScannerScreen = ({ onLogout }) => {
     // Initial Load & DB Init
     useEffect(() => {
         initDB();
+
+        // Load Base URL for Images
+        const getBaseUrl = async () => {
+            try {
+                const stored = await SecureStore.getItemAsync('api_url');
+                if (stored) {
+                    setBaseUrl(stored.replace(/\/$/, ''));
+                } else {
+                    // Fallback to API defaults
+                    const def = api.defaults.baseURL?.replace('/api/v1', '').replace(/\/$/, '');
+                    if (def) setBaseUrl(def);
+                }
+            } catch (e) {
+                console.error("Url Load Error", e);
+            }
+        };
+        getBaseUrl();
+
         loadData(false);
     }, []);
 
@@ -356,13 +375,69 @@ const MainScannerScreen = ({ onLogout }) => {
             });
         }
 
-        if (searchText) {
+        // Determine effective column to search
+        const activeSearchCol = (activeFilterConfig.searchColumn && activeFilterConfig.searchColumn !== 'all')
+            ? activeFilterConfig.searchColumn
+            : (config?.search_column_id || 'name');
+
+        // Check 'is_not_empty' first (Unary operator)
+        if (activeFilterConfig.matchType === 'is_not_empty') {
+            result = result.filter(item => {
+                const nameVal = item.name;
+                const colVal = String(getItemValue(item, activeSearchCol));
+
+                // If specific column selected, check ONLY that. 
+                // If "All" (default behavior), check Name OR Configured Search Column (backend default)
+                if (activeFilterConfig.searchColumn && activeFilterConfig.searchColumn !== 'all') {
+                    if (activeSearchCol === 'name') return nameVal && nameVal.trim().length > 0;
+                    return colVal && colVal.trim().length > 0;
+                }
+
+                return (nameVal && nameVal.trim().length > 0) || (colVal && colVal.trim().length > 0);
+            });
+        }
+        // Check 'is_empty' (Unary operator)
+        else if (activeFilterConfig.matchType === 'is_empty') {
+            result = result.filter(item => {
+                const nameVal = item.name;
+                const colVal = String(getItemValue(item, activeSearchCol));
+
+                if (activeFilterConfig.searchColumn && activeFilterConfig.searchColumn !== 'all') {
+                    if (activeSearchCol === 'name') return !nameVal || nameVal.trim().length === 0;
+                    return !colVal || colVal.trim().length === 0;
+                }
+                // Logical OR for empty check? "Either name is empty OR col is empty"? 
+                // Usually "Is Empty" implies checking a specific field. 
+                // If "All", maybe check if BOTH are empty? 
+                // Let's stick to "If matches either empty" for consistency, or "Both"
+                // Actually if searching "All", finding an empty field is rare goal.
+                // Let's assume if user picks "Is Empty" without column, they likely mean "Does not have value"
+                return (!nameVal || nameVal.trim().length === 0) && (!colVal || colVal.trim().length === 0);
+            });
+        }
+        else if (searchText) {
             const lower = searchText.toLowerCase();
-            const isExact = activeFilterConfig.matchType === 'exact';
+            const matchType = activeFilterConfig.matchType;
             result = result.filter(item => {
                 const nameVal = item.name.toLowerCase();
-                const colVal = String(getItemValue(item, searchColId)).toLowerCase();
-                if (isExact) return nameVal === lower || colVal === lower;
+                const colVal = String(getItemValue(item, activeSearchCol)).toLowerCase();
+
+                // If specific column selected, check ONLY that.
+                if (activeFilterConfig.searchColumn && activeFilterConfig.searchColumn !== 'all') {
+                    const targetVal = (activeSearchCol === 'name') ? nameVal : colVal;
+
+                    if (matchType === 'exact') return targetVal === lower;
+                    if (matchType === 'not_equal') return targetVal !== lower;
+                    if (matchType === 'does_not_contain') return !targetVal.includes(lower);
+                    return targetVal.includes(lower);
+                }
+
+                // Default "All" Behavior: Check Name OR Default Search Column
+                if (matchType === 'exact') return nameVal === lower || colVal === lower;
+                if (matchType === 'not_equal') return nameVal !== lower && colVal !== lower;
+                if (matchType === 'does_not_contain') return !nameVal.includes(lower) && !colVal.includes(lower);
+
+                // Default: Contains
                 return nameVal.includes(lower) || colVal.includes(lower);
             });
         }
@@ -379,11 +454,26 @@ const MainScannerScreen = ({ onLogout }) => {
 
         // Sorting
         result.sort((a, b) => {
-            const valA = String(getItemValue(a, activeFilterConfig.sortField)).toLowerCase();
-            const valB = String(getItemValue(b, activeFilterConfig.sortField)).toLowerCase();
-            if (valA < valB) return activeFilterConfig.sortDirection === 'asc' ? -1 : 1;
-            if (valA > valB) return activeFilterConfig.sortDirection === 'asc' ? 1 : -1;
-            return 0;
+            const valAStr = String(getItemValue(a, activeFilterConfig.sortField) || '');
+            const valBStr = String(getItemValue(b, activeFilterConfig.sortField) || '');
+
+            // Robust Numeric Check (Match Metadata Logic)
+            const valA = valAStr.trim();
+            const valB = valBStr.trim();
+
+            const numA = parseFloat(valA);
+            const numB = parseFloat(valB);
+
+            const isNumeric = !isNaN(numA) && !isNaN(numB) && valA !== '' && valB !== '' && !isNaN(Number(valA)) && !isNaN(Number(valB));
+
+            let comparison = 0;
+            if (isNumeric) {
+                comparison = numA - numB;
+            } else {
+                comparison = valA.toLowerCase().localeCompare(valB.toLowerCase());
+            }
+
+            return activeFilterConfig.sortDirection === 'asc' ? comparison : -comparison;
         });
 
         setFilteredItems(result);
@@ -412,6 +502,65 @@ const MainScannerScreen = ({ onLogout }) => {
 
         let subTitle = null;
         if (config?.display_column_ids?.includes('name') && searchColId !== 'name') subTitle = item.name;
+
+        // Extract Images
+        const images = [];
+
+        // 1. Priority: Check specialized 'assets' list (from Backend with Local Paths)
+        if (item.assets && Array.isArray(item.assets) && item.assets.length > 0) {
+            item.assets.forEach(f => {
+                const isImage = f.name && f.name.match(/\.(jpg|jpeg|png|gif|webp|bmp)$/i);
+                if (isImage) {
+                    // Path Priority: Optimized (Local) -> Local Original -> Public URL
+                    const path = f.optimized_url || f.local_url || f.optimized_path || f.local_path || f.public_url || f.url;
+
+                    if (path) {
+                        let absUrl = path;
+                        if (!path.startsWith('http')) {
+                            const base = baseUrl || 'http://192.168.137.1:8000';
+                            const cleanPath = path.replace(/^\//, '');
+                            absUrl = `${base}/${cleanPath}`;
+                        }
+                        images.push({ id: f.id, url: absUrl, name: f.name });
+                    }
+                }
+            });
+        }
+
+        // 2. Fallback: Parse column_values (Legacy / Remote URLs)
+        if (images.length === 0 && Array.isArray(item.column_values)) {
+            item.column_values.forEach(cv => {
+                if (cv.value) {
+                    try {
+                        const parsed = JSON.parse(cv.value);
+                        if (parsed && parsed.files && Array.isArray(parsed.files)) {
+                            parsed.files.forEach(f => {
+                                const isImage = f.name && f.name.match(/\.(jpg|jpeg|png|gif|webp|bmp)$/i);
+                                const isAsset = f.fileType === 'ASSET';
+
+                                if (isImage || isAsset) {
+                                    // Resolve URL: Prefer Optimized, then Original
+                                    const path = f.optimized_path || f.url || f.public_url;
+                                    if (path) {
+                                        // Construct Absolute URL
+                                        let absUrl = path;
+                                        if (!path.startsWith('http')) {
+                                            // Ensure we have a valid base
+                                            const base = baseUrl || 'http://192.168.137.1:8000'; // Hard fallback if state not ready
+                                            const cleanPath = path.replace(/^\//, ''); // Remove leading slash
+                                            absUrl = `${base}/${cleanPath}`;
+                                        }
+                                        images.push({ id: f.id, url: absUrl, name: f.name });
+                                    }
+                                }
+                            });
+                        }
+                    } catch (e) {
+                        // Not JSON, ignore
+                    }
+                }
+            });
+        }
 
         return (
             <TouchableOpacity style={[styles.itemCard, isSelected && styles.selectedCard]} onPress={() => setSelectedItem(item)}>
@@ -442,6 +591,24 @@ const MainScannerScreen = ({ onLogout }) => {
                                 : <Text style={{ color: '#ddd' }}>--</Text>)}
                     </View>
                 </View>
+
+                {/* Image Carousel */}
+                {images.length > 0 && (
+                    <View style={styles.carouselContainer}>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                            {images.map((img, index) => (
+                                <View key={`${img.id}-${index}`} style={styles.imageWrapper}>
+                                    <Image
+                                        source={{ uri: img.url }}
+                                        style={styles.itemImage}
+                                        resizeMode="cover"
+                                        onError={(e) => console.log("Image Load Error:", img.url, e.nativeEvent.error)}
+                                    />
+                                </View>
+                            ))}
+                        </ScrollView>
+                    </View>
+                )}
             </TouchableOpacity>
         );
     };
@@ -480,10 +647,24 @@ const MainScannerScreen = ({ onLogout }) => {
             <View style={styles.listContainer}>
                 <View style={styles.listHeader}>
                     <View style={styles.searchContainer}>
-                        <Search size={20} color="#6b7280" />
-                        <TextInput style={styles.searchInput} placeholder="Search..." value={searchText} onChangeText={handleSearch} />
-                        <TouchableOpacity onPress={() => setFilterModalVisible(true)} style={[styles.filterIconBtn, (activeFilterConfig.filterStatus !== 'all') && styles.filterIconBtnActive]}>
-                            <Filter size={20} color={activeFilterConfig.filterStatus !== 'all' ? "#2563eb" : "#6b7280"} />
+                        {activeFilterConfig.matchType === 'is_not_empty' ? (
+                            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
+                                <Search size={20} color="#2563eb" />
+                                <Text style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: 8 }}>Filter: Is Not Empty</Text>
+                            </View>
+                        ) : activeFilterConfig.matchType === 'is_empty' ? (
+                            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
+                                <Search size={20} color="#2563eb" />
+                                <Text style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: 8 }}>Filter: Is Empty</Text>
+                            </View>
+                        ) : (
+                            <>
+                                <Search size={20} color="#6b7280" />
+                                <TextInput style={styles.searchInput} placeholder="Search..." value={searchText} onChangeText={handleSearch} />
+                            </>
+                        )}
+                        <TouchableOpacity onPress={() => setFilterModalVisible(true)} style={[styles.filterIconBtn, (activeFilterConfig.filterStatus !== 'all' || activeFilterConfig.matchType !== 'contains') && styles.filterIconBtnActive]}>
+                            <Filter size={20} color={(activeFilterConfig.filterStatus !== 'all' || activeFilterConfig.matchType !== 'contains') ? "#2563eb" : "#6b7280"} />
                         </TouchableOpacity>
                     </View>
 
@@ -577,7 +758,10 @@ const styles = StyleSheet.create({
     selectedText: { color: '#1e40af' },
     loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
     barcodeBadge: { backgroundColor: '#f3f4f6', padding: 4, borderRadius: 6, borderWidth: 1, borderColor: '#e5e7eb' },
-    barcodeText: { fontSize: 12, fontWeight: 'bold', color: '#374151', fontFamily: 'monospace' }
+    barcodeText: { fontSize: 12, fontWeight: 'bold', color: '#374151', fontFamily: 'monospace' },
+    carouselContainer: { marginTop: 12, marginBottom: 4 },
+    imageWrapper: { marginRight: 8, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#e5e7eb', backgroundColor: '#f3f4f6' },
+    itemImage: { width: 60, height: 60 }
 });
 
 export default MainScannerScreen;

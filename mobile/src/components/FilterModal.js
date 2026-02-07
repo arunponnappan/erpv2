@@ -5,6 +5,7 @@ import { X, Check } from 'lucide-react-native';
 
 const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] }) => {
     // Local state for the modal form
+    const [searchColumn, setSearchColumn] = useState(currentConfig?.searchColumn || 'all');
     const [sortField, setSortField] = useState(currentConfig?.sortField || 'name');
     const [sortDirection, setSortDirection] = useState(currentConfig?.sortDirection || 'asc');
     const [filterStatus, setFilterStatus] = useState(currentConfig?.filterStatus || 'all');
@@ -14,6 +15,7 @@ const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] })
     // Reset local state when modal opens
     useEffect(() => {
         if (visible) {
+            setSearchColumn(currentConfig?.searchColumn || 'all');
             setSortField(currentConfig?.sortField || 'name');
             setSortDirection(currentConfig?.sortDirection || 'asc');
             setFilterStatus(currentConfig?.filterStatus || 'all');
@@ -24,6 +26,7 @@ const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] })
 
     const handleApply = () => {
         onApply({
+            searchColumn,
             sortField,
             sortDirection,
             filterStatus,
@@ -34,6 +37,7 @@ const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] })
     };
 
     const handleClear = () => {
+        setSearchColumn('all');
         setSortField('name');
         setSortDirection('asc');
         setFilterStatus('all');
@@ -69,6 +73,23 @@ const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] })
                     </View>
 
                     <ScrollView style={styles.scrollContent}>
+                        {/* 0. Search Column */}
+                        <View style={styles.section}>
+                            <Text style={styles.sectionTitle}>Filter By Column</Text>
+                            <View style={styles.row}>
+                                {renderChip("All Columns (Default)", searchColumn === 'all', () => setSearchColumn('all'))}
+                                {renderChip("Name", searchColumn === 'name', () => setSearchColumn('name'))}
+                                {columns.map(col => (
+                                    renderChip(
+                                        col.title || col.id,
+                                        searchColumn === col.id,
+                                        () => setSearchColumn(col.id),
+                                        `search-${col.id}`
+                                    )
+                                ))}
+                            </View>
+                        </View>
+
                         {/* 1. Sort Field */}
                         <View style={styles.section}>
                             <Text style={styles.sectionTitle}>Sort Column</Text>
@@ -128,6 +149,10 @@ const FilterModal = ({ visible, onClose, onApply, currentConfig, columns = [] })
                                 <View style={styles.row}>
                                     {renderChip("Contains", matchType === 'contains', () => setMatchType('contains'))}
                                     {renderChip("Exact Match", matchType === 'exact', () => setMatchType('exact'))}
+                                    {renderChip("Does Not Contain", matchType === 'does_not_contain', () => setMatchType('does_not_contain'))}
+                                    {renderChip("Not Equal (Is Not)", matchType === 'not_equal', () => setMatchType('not_equal'))}
+                                    {renderChip("Is Not Empty", matchType === 'is_not_empty', () => setMatchType('is_not_empty'))}
+                                    {renderChip("Is Empty", matchType === 'is_empty', () => setMatchType('is_empty'))}
                                 </View>
                             </View>
                         </View>
